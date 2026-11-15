@@ -1,0 +1,101 @@
+name: Validate Ubuntu 26.04 system FFmpeg 8
+
+# An isolated compatibility experiment, not a change to the release baseline.
+on:
+  push:
+    branches: [ci/validate-ubuntu2604-ffmpeg8]
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    name: FFmpeg 8 (${{ matrix.suite }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [media, application]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      # Do not restore compiler outputs or use the repository's kache wrapper:
+      # this experiment must compile against the distro headers and libraries.
+      RUSTC_WRAPPER: ""
+      PKG_CONFIG_PATH: ""
+      LD_LIBRARY_PATH: ""
+      FORCE_SKIA_BUILD: "1"
+      SKIA_USE_SYSTEM_LIBRARIES: "1"
+      CC: clang
+      CXX: clang++
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install distro SDK and native dependencies
+        uses: ./.github/actions/apt-install
+        with:
+          packages: >-
+            ffmpeg libavformat-dev libavcodec-dev libavutil-dev
+            libswresample-dev libavfilter-dev libswscale-dev
+            build-essential pkg-config clang libclang-dev cmake ninja-build python3
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+            libicu-dev libharfbuzz-dev libfreetype-dev libfontconfig1-dev
+            libpng-dev zlib1g-dev libexpat1-dev libjpeg-dev fonts-wqy-microhei
+
+      - name: Verify Ubuntu and system FFmpeg versions
+        id: sdk
+        shell: bash
+        run: |
+          . /etc/os-release
+          test "$VERSION_ID" = "26.04"
+          test -z "${FFMPEG_DIR:-}"
+          test -z "${LD_PRELOAD:-}"
+          test "$(command -v ffmpeg)" = /usr/bin/ffmpeg
+          version=$(dpkg-query -W -f='${Version}' ffmpeg)
+          [[ "$version" =~ ^([0-9]+:)?8\. ]]
+          [[ "$(pkg-config --modversion libavformat)" == 62.* ]]
+          /usr/bin/ffmpeg -version
+          /usr/bin/ffprobe -version
+          for library in libavcodec libavformat libavutil libavfilter libswresample libswscale; do
+            test "$(pkg-config --variable=prefix "$library")" = /usr
+            printf '%s: %s (%s)\n' "$library" \
+              "$(pkg-config --modversion "$library")" "$(pkg-config --variable=libdir "$library")"
+          done
+          {
+            echo "### Ubuntu 26.04 / system FFmpeg compatibility"
+            echo "- Source commit: $GITHUB_SHA"
+            echo "- Installed FFmpeg package: $version"
+            echo "- SDK prefix: /usr"
+            echo "- Compiler output cache: disabled"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Setup sherpa-onnx archive
+        if: matrix.suite == 'application'
+        uses: ./.github/actions/setup-sherpa-onnx
+
+      - name: HLS recording, object storage and resume tests
+        if: matrix.suite == 'media'
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml -p ffmpeg_utils --lib hls:: --locked
+
+      - name: Full native media tests with distro CLI oracles
+        if: ${{ !cancelled() && steps.sdk.outcome == 'success' && matrix.suite == 'media' }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p ffmpeg_utils --locked
+
+      - name: Recorder unit and integration tests
+        if: ${{ !cancelled() && steps.sdk.outcome == 'success' && matrix.suite == 'media' }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml --package recorder --tests --locked
+
+      - name: Desktop application media tests
+        if: matrix.suite == 'application'
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --package bili-shadowreplay --bin bili-shadowreplay ffmpeg:: --locked
+
+      - name: Headless application media tests
+        if: ${{ !cancelled() && steps.sdk.outcome == 'success' && matrix.suite == 'application' }}
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --package bili-shadowreplay --no-default-features --features headless --bin bili-shadowreplay ffmpeg:: --locked
