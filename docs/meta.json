@@ -3,7 +3,6 @@
   "pages": [
     "getting-started",
     "usage",
-    "development",
-    "TESTING"
+    "development"
   ]
 }

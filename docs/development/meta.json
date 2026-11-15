@@ -5,6 +5,7 @@
     "frontend",
     "backend",
     "platforms",
+    "testing",
     "native-overlay",
     "updater"
   ]

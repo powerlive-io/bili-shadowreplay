@@ -40,7 +40,7 @@ GitHub Actions 的测试、Clippy 和桌面发布任务通过 `setup-kache` 安�
 
 ### 提交前检查与 CI
 
-pre-commit 只运行空白、文件结尾、Rust 格式检查和默认/headless 两套 Clippy lint，不运行测试。完整测试由 GitHub Actions 执行：`Lint` 工作流在 Rust 构建输入变化时运行默认/headless 两套 `cargo test`，推送到 `main` 时始终运行；`Tests` 工作流继续负责前端、workspace library 和 recorder 集成等测试。需要本地验证时，可按 [测试指南](../docs/TESTING.md) 手动运行相关测试。
+pre-commit 只运行空白、文件结尾、Rust 格式检查和默认/headless 两套 Clippy lint，不运行测试。完整测试由 GitHub Actions 执行：`Lint` 工作流在 Rust 构建输入变化时运行默认/headless 两套 `cargo test`，推送到 `main` 时始终运行；`Tests` 工作流继续负责前端、workspace library 和 recorder 集成等测试。需要本地验证时，可按 [测试指南](../docs/development/testing/overview.md) 手动运行相关测试。
 
 ### MacOS
 
@@ -108,7 +108,7 @@ yarn --cwd docs install --frozen-lockfile
 yarn docs:dev
 ```
 
-文档源文件保留在 `docs/getting-started/`、`docs/usage/`、`docs/development/`；新增页面需要填写 `title` frontmatter，并在对应的 `meta.json` 中安排导航顺序。Markdown 中可以继续使用相对 `.md` 链接、Mermaid 代码块和 HTML 视频。`docs/TESTING.md` 也会发布到文档站。
+文档源文件保留在 `docs/getting-started/`、`docs/usage/`、`docs/development/`；新增页面需要填写 `title` frontmatter，并在对应的 `meta.json` 中安排导航顺序。Markdown 中可以继续使用相对 `.md` 链接、Mermaid 代码块和 HTML 视频。测试指南位于 `docs/development/testing/`；旧 `/TESTING` 地址由静态兼容页引导至新入口。
 
 首页原有的 Vue 交互演示位于 `docs/home/`，在构建时预渲染，浏览器中只挂载到独立的首页容器。启动开发服务时会先生成首页资源；修改首页组件后，执行 `yarn --cwd docs home:build` 并刷新页面。
 

@@ -1,0 +1,12 @@
+{
+  "title": "测试指南",
+  "pages": [
+    "overview",
+    "running",
+    "audio",
+    "video-recording",
+    "platform-validation",
+    "writing-tests",
+    "ci"
+  ]
+}

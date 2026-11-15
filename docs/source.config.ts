@@ -6,7 +6,7 @@ import { headingSlug } from './lib/heading-slug';
 export const docs = defineDocs({
   dir: '.',
   docs: {
-    files: ['getting-started/**/*.md', 'usage/**/*.md', 'development/**/*.md', 'TESTING.md'],
+    files: ['getting-started/**/*.md', 'usage/**/*.md', 'development/**/*.md'],
   },
   meta: {
     files: ['meta.json', 'getting-started/**/meta.json', 'usage/**/meta.json', 'development/**/meta.json'],

@@ -51,16 +51,30 @@ for (const file of files) {
 }
 assert.deepEqual(failures, [], 'Broken internal links, anchors or missing assets');
 const content = ['getting-started', 'usage', 'development'].flatMap((dir) => readdirSync(dir, { recursive: true }).filter((f) => f.endsWith('.md')).map((f) => `${dir}/${f}`));
-for (const file of [...content, 'TESTING.md']) assert(existsSync(path.join(root, file.replace(/\.md$/, '.html'))), `Missing page: ${file}`);
+for (const file of content) assert(existsSync(path.join(root, file.replace(/\.md$/, '.html'))), `Missing page: ${file}`);
+const testingUrl = '/development/testing/overview';
+const legacyTesting = pages.get(path.join(root, 'TESTING.html'));
+assert(legacyTesting, 'Legacy testing URL remains available');
+let testingRedirect;
+walk(legacyTesting.tree, (node) => {
+  const attrs = Object.fromEntries((node.attrs ?? []).map(({ name, value }) => [name, value]));
+  if (node.tagName === 'meta' && attrs['http-equiv'] === 'refresh') testingRedirect = attrs.content;
+});
+assert.equal(testingRedirect, `0; url=${testingUrl}`, 'Legacy testing URL redirects to the new guide');
+const rootNavigation = JSON.parse(readFileSync('meta.json', 'utf8'));
+const developmentNavigation = JSON.parse(readFileSync('development/meta.json', 'utf8'));
+assert(!rootNavigation.pages.includes('TESTING'), 'Testing is no longer a top-level navigation item');
+assert(developmentNavigation.pages.includes('testing'), 'Testing belongs under development');
 assert.equal(readFileSync(path.join(root, 'CNAME'), 'utf8').trim(), 'bsr.powerlive.io');
 assert(existsSync(path.join(root, '.nojekyll')));
 assert.match(readFileSync(path.join(root, 'index.html'), 'utf8'), /切片编辑/, 'Homepage is prerendered');
 assert.match(readFileSync(path.join(root, 'usage/features/room.html'), 'utf8'), /<video[^>]+src="\/videos\/deeplinking.mp4"/, 'Inline videos survive Markdown compilation');
 assert.match(readFileSync(path.join(root, 'usage/features/workflow.html'), 'utf8'), /图表加载中/, 'Mermaid blocks reach the renderer');
 const index = readFileSync(path.join(root, 'api/search'), 'utf8');
+assert(!index.includes('/TESTING'), 'Legacy testing content is absent from search');
 const client = staticClient({ from: `data:application/json;base64,${Buffer.from(index).toString('base64')}` });
-for (const [query, expected] of [['字幕', '/usage/features/subtitle'], ['Docker', '/getting-started/installation/docker'], ['录制', '/development/backend/recorder-manager']]) {
+for (const [query, expected] of [['字幕', '/usage/features/subtitle'], ['Docker', '/getting-started/installation/docker'], ['录制', '/development/backend/recorder-manager'], ['音频回归', '/development/testing/audio'], ['测试概览', testingUrl]]) {
   const results = await client.search(query);
   assert(results.some((result) => result.url?.startsWith(expected)), `Search failed: ${query}`);
 }
-console.log(`Verified ${content.length + 1} documentation pages, ${links} internal links/assets (${fragments} fragments), homepage, videos, Mermaid and Chinese/English static search.`);
+console.log(`Verified ${content.length} documentation pages, legacy testing redirect, testing navigation, ${links} internal links/assets (${fragments} fragments), homepage, videos, Mermaid and Chinese/English static search.`);
