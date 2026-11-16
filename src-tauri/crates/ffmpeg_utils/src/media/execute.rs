@@ -805,6 +805,7 @@ fn execute(
         flags,
     };
     mux.header(&mut routes, &input)?;
+    let mut audio_replay = super::audio_replay::AudioReplay::new(&input);
     loop {
         util::check(&cancelled)?;
         if routes.iter().all(Route::done) {
@@ -820,6 +821,9 @@ fn execute(
             continue;
         };
         if routes[index].done() {
+            continue;
+        }
+        if audio_replay.is_replay(&packet) {
             continue;
         }
         let offset =

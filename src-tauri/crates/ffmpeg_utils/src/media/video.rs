@@ -2,6 +2,7 @@ use super::{
     util::{self, Device, Limits},
     video_clock::VideoClock,
     video_encoder::VideoEncoderStage,
+    video_sar::VideoSar,
     EncodedPacketSink, FrameRatePolicy, VideoEncodeOptions,
 };
 use crate::video_frame::{display_matrix, filter_has_option, rotation_filters};
@@ -42,6 +43,7 @@ pub(super) struct VideoStage {
     graph: Option<filter::Graph>,
     input_format: Option<InputFormat>,
     clock: VideoClock,
+    sar: VideoSar,
     base: Rational,
     rate: Rational,
     rotation: Option<[i32; 9]>,
@@ -129,6 +131,7 @@ impl VideoStage {
             graph: None,
             input_format: None,
             clock: VideoClock::new(base, average_rate, decoder_rate, timestamps_unreliable),
+            sar: VideoSar::default(),
             base,
             rate,
             rotation,
@@ -325,6 +328,7 @@ impl VideoStage {
         frame: &mut frame::Video,
         packets: &mut EncodedPacketSink<'_>,
     ) -> Result<(), String> {
+        self.sar.normalize(frame);
         if self
             .input_format
             .is_some_and(|format| format != InputFormat::of(frame))

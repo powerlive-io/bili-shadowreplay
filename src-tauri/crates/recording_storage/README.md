@@ -115,6 +115,15 @@ continues the chunk format when reading an archive copied from an object backend
 
 `materialize(&keys)` copies only explicitly requested objects into a `LocalAssets`
 lease. Keep the lease alive while FFmpeg or another consumer uses its paths.
+Copies run with at most three files in flight, reading each file sequentially in
+1 MiB chunks. Duplicate keys are copied/counted once so concurrent workers never
+write the same destination. Failure or cancellation drops the other in-flight
+downloads; no detached download tasks continue after the caller returns.
+`materialize_with_progress` additionally awaits a caller callback before copying
+and after each chunk/file, reporting completed/total files and bytes actually
+copied. Callback calls are serialized and counts aggregate all three downloads.
+Callers should throttle UI updates; no extra metadata pass or background reporting
+task is started.
 `LocalAssets::new()` creates an empty lease for scratch-only tasks. Lease writes
 never publish archive objects; callers explicitly publish any desired results.
 Failure, cancellation and drop clean up temporary files, including queued blocking

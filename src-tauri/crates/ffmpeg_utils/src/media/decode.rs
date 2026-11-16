@@ -1,6 +1,8 @@
 //! Demand-fed decoders for complex graphs. Only requested inputs are read;
 //! pending frames from other streams of the same demuxer have a fixed bound.
-use super::{audio_encoder::layout_name, util, video_clock::VideoClock, MediaInput};
+use super::{
+    audio_encoder::layout_name, util, video_clock::VideoClock, video_sar::VideoSar, MediaInput,
+};
 use crate::audio::{AudioClock, AudioFormat};
 use crate::profiling as perf;
 use ffmpeg_next::{self as ffmpeg, codec, ffi, filter, format, frame, media, Packet, Rational};
@@ -157,6 +159,7 @@ pub(super) struct GraphDecoder {
     pub(super) rate: Rational,
     pub(super) rotation: Option<[i32; 9]>,
     pub(super) template: Option<DecodedFrame>,
+    sar: VideoSar,
     pending: VecDeque<DecodedFrame>,
     pending_bytes: usize,
     packets: VecDeque<Packet>,
@@ -233,6 +236,7 @@ impl GraphDecoder {
             rate,
             rotation,
             template: None,
+            sar: VideoSar::default(),
             pending: VecDeque::new(),
             pending_bytes: 0,
             packets: VecDeque::new(),
@@ -381,6 +385,7 @@ impl GraphDecoder {
                 (Decoder::Video(d, clock), DecodedFrame::Video(f)) => {
                     clock.set_decoder_rate(d.frame_rate().unwrap_or(Rational(0, 1)));
                     clock.normalize(f)?;
+                    self.sar.normalize(f);
                 }
                 _ => unreachable!(),
             }

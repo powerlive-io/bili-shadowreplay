@@ -56,9 +56,10 @@
   aria-valuetext={update?.content ?? placeholder}
   title={[stage, position, remaining].filter(Boolean).join(" · ")}
 >
-  <!-- Fixed side columns keep bars aligned when several tasks are listed. -->
-  <span class="w-[5.5rem] shrink-0 truncate text-fg-secondary">{stage}</span>
-  <div class="h-1 min-w-[3rem] flex-1 overflow-hidden rounded-full bg-fg/10">
+  <!-- Measured stages align their columns. Preparation messages need room for
+       file/byte counts rather than truncating everything after "准备录播". -->
+  <span class="{progress ? 'w-[5.5rem] shrink-0 truncate' : 'min-w-0 flex-1 break-words'} text-fg-secondary">{stage}</span>
+  <div class="h-1 min-w-[3rem] {progress ? 'flex-1' : 'w-16 shrink-0'} overflow-hidden rounded-full bg-fg/10">
     {#key barKey}
       {#if percent !== null}
         <div
@@ -70,13 +71,15 @@
       {/if}
     {/key}
   </div>
-  <span class="w-[8.5rem] shrink-0 truncate text-right tabular-nums text-fg-muted">
-    {#if percent !== null}
-      <span class="font-medium text-accent-fg">{percent}%</span>{remaining ? ` · ${remaining}` : ""}
-    {:else}
-      {position}
-    {/if}
-  </span>
+  {#if progress}
+    <span class="w-[8.5rem] shrink-0 truncate text-right tabular-nums text-fg-muted">
+      {#if percent !== null}
+        <span class="font-medium text-accent-fg">{percent}%</span>{remaining ? ` · ${remaining}` : ""}
+      {:else}
+        {position}
+      {/if}
+    </span>
+  {/if}
 </div>
 
 <style>

@@ -43,6 +43,93 @@ async fn remux(source: &Path, target: &Path) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn renewed_hls_audio_replay_matches_the_uninterrupted_recording() {
+    if !has_cli() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original.ts");
+    fragment(&original, "160x90", "red", 6.0, 30.0, "setsar=1");
+    cli(
+        &strings(&[
+            "-i",
+            original.to_str().unwrap(),
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-f",
+            "segment",
+            "-segment_time",
+            "2",
+        ]),
+        &directory.path().join("part-%d.ts"),
+    );
+    let parts: Vec<_> = (0..3)
+        .map(|i| fs::read(directory.path().join(format!("part-{i}.ts"))).unwrap())
+        .collect();
+    let baseline = directory.path().join("baseline.ts");
+    let renewed = directory.path().join("renewed.ts");
+    fs::write(&baseline, parts.concat()).unwrap();
+    fs::write(
+        &renewed,
+        [&parts[0][..], &parts[1], &parts[1], &parts[2]].concat(),
+    )
+    .unwrap();
+
+    // Both executors must remove replay before either copying or decoding audio.
+    for shared in [false, true] {
+        for encode_audio in [false, true] {
+            let mut results = Vec::new();
+            for (i, source) in [&baseline, &renewed].into_iter().enumerate() {
+                let target = directory
+                    .path()
+                    .join(format!("{shared}-{encode_audio}-{i}.mp4"));
+                let audio = if encode_audio {
+                    StreamMode::Audio(AudioEncodeOptions::default())
+                } else {
+                    StreamMode::Copy
+                };
+                let job = if shared {
+                    let mut job = graph_plan(
+                        vec![MediaInput::file(source)],
+                        vec![MediaOutput::file(&target)],
+                        "[0:v]fps=20[v]",
+                        vec![binding(0, true)],
+                        vec![graph_route("v", 0, StreamMode::Video(video_options()))],
+                        vec![output("v", true)],
+                    );
+                    job.routes.push(StreamRoute {
+                        source: StreamSource::Input {
+                            input: 0,
+                            selector: StreamSelector::FirstAudio,
+                        },
+                        output: 0,
+                        required: true,
+                        mode: audio,
+                    });
+                    job
+                } else {
+                    plan(source, &target, StreamMode::Copy, audio)
+                };
+                execute_media_plan(job, None).await.unwrap();
+                results.push(
+                    snapshot(&target)
+                        .streams
+                        .into_iter()
+                        .find(|s| s.kind == media::Type::Audio)
+                        .unwrap(),
+                );
+            }
+            assert_eq!(
+                results[0], results[1],
+                "shared={shared}, encode_audio={encode_audio}: replay must not alter audio packets or timing"
+            );
+        }
+    }
+}
+
 async fn join(sources: &[std::path::PathBuf], target: &Path) -> Result<(), String> {
     let mut filters = Vec::new();
     let mut pads = String::new();
@@ -224,6 +311,49 @@ async fn assert_seven_recordings(change_formats: bool) {
 #[tokio::test]
 async fn shared_concat_rejects_an_early_sar_change() {
     assert_fragment_change("90x160", "setsar=2", 0.1).await;
+}
+
+#[tokio::test]
+async fn shared_concat_inherits_missing_sar_within_each_recording() {
+    if !has_cli() {
+        return;
+    }
+    for (head_sar, body_sar) in [(1, 0), (2, 0), (0, 1), (0, 0)] {
+        let directory = tempfile::tempdir().unwrap();
+        let head = directory.path().join("head.ts");
+        let body = directory.path().join("body.ts");
+        fragment(
+            &head,
+            "160x90",
+            "red",
+            1.0,
+            30.0,
+            &format!("setsar={head_sar}"),
+        );
+        fragment(
+            &body,
+            "160x90",
+            "blue",
+            1.0,
+            31.0,
+            &format!("setsar={body_sar}"),
+        );
+        let source = directory.path().join("source.ts");
+        fs::write(
+            &source,
+            [fs::read(head).unwrap(), fs::read(body).unwrap()].concat(),
+        )
+        .unwrap();
+        let remuxed = directory.path().join("source.mp4");
+        remux(&source, &remuxed).await;
+        let target = directory.path().join("joined.mp4");
+        join(&[remuxed], &target)
+            .await
+            .unwrap_or_else(|error| panic!("SAR {head_sar} -> {body_sar}: {error}"));
+        assert_eq!(frame_colors(&target), (20, 20));
+        assert_duration(&target, 2.0);
+        assert_clean(directory.path());
+    }
 }
 
 #[tokio::test]

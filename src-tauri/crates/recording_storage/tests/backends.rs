@@ -17,9 +17,60 @@ struct Memory {
     fail_remove: Mutex<Option<String>>,
     fail_write: Mutex<Option<String>>,
     fail_read: Mutex<Option<String>>,
+    read_control: Option<Arc<ReadControl>>,
     pause_next_write: std::sync::atomic::AtomicBool,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
+}
+
+struct ReadControl {
+    active: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+    started: Mutex<Vec<String>>,
+    changed: tokio::sync::Notify,
+    permits: tokio::sync::Semaphore,
+}
+
+impl ReadControl {
+    fn new() -> Self {
+        Self {
+            active: 0.into(),
+            peak: 0.into(),
+            started: Mutex::new(Vec::new()),
+            changed: tokio::sync::Notify::new(),
+            permits: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    async fn read(&self, key: &str) {
+        use std::sync::atomic::Ordering::SeqCst;
+        struct Active<'a>(&'a ReadControl);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.active.fetch_sub(1, SeqCst);
+            }
+        }
+        let active = self.active.fetch_add(1, SeqCst) + 1;
+        let _active = Active(self);
+        self.peak.fetch_max(active, SeqCst);
+        self.started.lock().unwrap().push(key.into());
+        self.changed.notify_one();
+        self.permits.acquire().await.unwrap().forget();
+    }
+
+    async fn wait_for_reads(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let changed = self.changed.notified();
+                if self.started.lock().unwrap().len() >= count {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("downloads did not start concurrently");
+    }
 }
 
 #[async_trait]
@@ -27,6 +78,12 @@ impl StorageBackend for Memory {
     async fn read_range(&self, key: &str, range: std::ops::Range<u64>) -> io::Result<Vec<u8>> {
         if range.start > range.end {
             return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if let Some(control) = &self.read_control {
+            control.read(key).await;
+        }
+        if self.fail_read.lock().unwrap().as_deref() == Some(key) {
+            return Err(io::ErrorKind::TimedOut.into());
         }
         let objects = self.objects.lock().unwrap();
         let bytes = objects.get(key).ok_or(io::ErrorKind::NotFound)?;
@@ -486,6 +543,154 @@ async fn materialization_copies_only_selected_assets_and_lease_cleans_up() {
     let scratch_path = scratch.path("scratch").unwrap();
     drop(scratch);
     assert!(!scratch_path.exists());
+}
+
+#[tokio::test]
+async fn materialization_reports_chunk_bytes_and_completed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = RecordingStorage::local(dir.path());
+    let mib = 1024 * 1024;
+    storage.write("empty.ts", b"").await.unwrap();
+    storage
+        .write("large.ts", &vec![7; 2 * mib + 3])
+        .await
+        .unwrap();
+    let mut updates = Vec::new();
+    let assets = storage
+        .materialize_with_progress(&["empty.ts".into(), "large.ts".into()], |progress| {
+            updates.push((
+                progress.completed_files,
+                progress.total_files,
+                progress.copied_bytes,
+            ));
+            async {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(updates.first(), Some(&(0, 2, 0)));
+    assert_eq!(updates.last(), Some(&(2, 2, (2 * mib + 3) as u64)));
+    assert!(updates.iter().all(|update| update.1 == 2));
+    assert!(updates
+        .windows(2)
+        .all(|pair| pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2));
+    assert!(updates.iter().any(|update| update.2 == mib as u64));
+    assert!(updates.iter().any(|update| update.2 == (2 * mib) as u64));
+    assert_eq!(assets.read("large.ts").await.unwrap().len(), 2 * mib + 3);
+
+    updates.clear();
+    assert!(storage
+        .materialize_with_progress(&["missing.ts".into()], |progress| {
+            updates.push((
+                progress.completed_files,
+                progress.total_files,
+                progress.copied_bytes,
+            ));
+            async {}
+        })
+        .await
+        .is_err());
+    assert_eq!(updates, [(0, 1, 0)], "failure must not report completion");
+}
+
+async fn controlled_materialization(
+) -> (RecordingStorage, Arc<Memory>, Arc<ReadControl>, Vec<String>) {
+    let control = Arc::new(ReadControl::new());
+    let backend = Arc::new(Memory {
+        read_control: Some(control.clone()),
+        ..Default::default()
+    });
+    let storage = RecordingStorage::with_backend(
+        backend.clone(),
+        LocalWorkspace::new("unused-materialization-workspace"),
+    );
+    let keys: Vec<_> = (0..7).map(|i| format!("{i}.ts")).collect();
+    for key in &keys {
+        storage.write(key, key.as_bytes()).await.unwrap();
+    }
+    (storage, backend, control, keys)
+}
+
+#[tokio::test]
+async fn materialization_downloads_three_files_at_a_time_and_aggregates_progress() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (storage, _, control, keys) = controlled_materialization().await;
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = updates.clone();
+    let expected = keys.clone();
+    let worker = tokio::spawn(async move {
+        storage
+            .materialize_with_progress(&keys, |progress| {
+                observed.lock().unwrap().push(progress);
+                async {}
+            })
+            .await
+    });
+    control.wait_for_reads(3).await;
+    assert_eq!(control.active.load(SeqCst), 3);
+    assert_eq!(control.started.lock().unwrap().len(), 3);
+    control.permits.add_permits(1);
+    control.wait_for_reads(4).await;
+    assert_eq!(control.active.load(SeqCst), 3, "completed slots are reused");
+    control.permits.add_permits(6);
+    let assets = worker.await.unwrap().unwrap();
+    assert_eq!(control.peak.load(SeqCst), 3);
+    assert_eq!(control.active.load(SeqCst), 0);
+    for key in &expected {
+        assert_eq!(assets.read(key).await.unwrap(), key.as_bytes());
+    }
+    let updates = updates.lock().unwrap();
+    assert_eq!(updates.last().unwrap().completed_files, 7);
+    assert_eq!(updates.last().unwrap().total_files, 7);
+    assert_eq!(
+        updates.last().unwrap().copied_bytes,
+        expected.iter().map(|key| key.len() as u64).sum::<u64>()
+    );
+    assert!(updates.windows(2).all(|pair| {
+        pair[0].completed_files <= pair[1].completed_files
+            && pair[0].copied_bytes <= pair[1].copied_bytes
+    }));
+}
+
+#[tokio::test]
+async fn materialization_failure_and_cancellation_drop_other_downloads() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for cancel in [false, true] {
+        let (storage, backend, control, keys) = controlled_materialization().await;
+        let worker = tokio::spawn(async move { storage.materialize(&keys).await });
+        control.wait_for_reads(3).await;
+        if cancel {
+            worker.abort();
+            assert!(worker.await.err().unwrap().is_cancelled());
+        } else {
+            *backend.fail_read.lock().unwrap() = Some(control.started.lock().unwrap()[0].clone());
+            control.permits.add_permits(1);
+            let error = worker.await.unwrap().err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+        assert_eq!(control.active.load(SeqCst), 0);
+        assert_eq!(control.started.lock().unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn materialization_duplicate_keys_have_one_writer_and_one_progress_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = RecordingStorage::local(directory.path());
+    let content = vec![7; 1024 * 1024 + 3];
+    storage.write("same.ts", &content).await.unwrap();
+    let mut final_progress = None;
+    let assets = storage
+        .materialize_with_progress(&vec!["same.ts".into(); 5], |progress| {
+            final_progress = Some(progress);
+            async {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(assets.read("same.ts").await.unwrap(), content);
+    let progress = final_progress.unwrap();
+    assert_eq!(progress.total_files, 1);
+    assert_eq!(progress.completed_files, 1);
+    assert_eq!(progress.copied_bytes, content.len() as u64);
 }
 
 #[cfg(unix)]

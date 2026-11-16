@@ -1384,28 +1384,45 @@ impl RecorderManager {
         room_id: &str,
         parent_id: &str,
         selected_live_ids: Option<&[String]>,
+        reporter: Option<&ProgressReporter>,
     ) -> Result<Vec<RelatedPlaylist>, RecorderManagerError> {
         let archives = self
             .db
             .get_archives_by_parent_id(room_id, parent_id)
             .await?;
-        let mut playlists = Vec::new();
-        for archive in archives
+        let archives: Vec<_> = archives
             .into_iter()
             .filter(|archive| archive.platform == platform.as_str())
             .filter(|archive| selected_live_ids.is_none_or(|ids| ids.contains(&archive.live_id)))
-        {
-            let assets = self
-                .materialize_recording(*platform, room_id, &archive.live_id)
+            .collect();
+        let mut playlists = Vec::new();
+        let total = archives.len();
+        for (index, archive) in archives.into_iter().enumerate() {
+            let stage = format!("准备录播 {}/{total}", index + 1);
+            if let Some(reporter) = reporter {
+                reporter.update(&format!("{stage}：连接存储")).await;
+            }
+            let assets = async {
+                let storage = self
+                    .recording_storage(*platform, room_id, &archive.live_id)
+                    .await?;
+                crate::recording_materialization::materialize_with_progress(
+                    &storage,
+                    &[],
+                    reporter,
+                    &stage,
+                )
                 .await
-                .map_err(|error| RecorderManagerError::ClipError {
-                    err: format!(
-                        "Failed to materialize archive {}/{}/{} from playlist.m3u8: {error}",
-                        platform.as_str(),
-                        room_id,
-                        archive.live_id
-                    ),
-                })?;
+            }
+            .await
+            .map_err(|error| RecorderManagerError::ClipError {
+                err: format!(
+                    "Failed to materialize archive {}/{}/{} from playlist.m3u8: {error}",
+                    platform.as_str(),
+                    room_id,
+                    archive.live_id
+                ),
+            })?;
             playlists.push(RelatedPlaylist {
                 live_id: archive.live_id,
                 title: archive.title,
@@ -2081,6 +2098,12 @@ impl RecorderManager {
         reporter: Option<&ProgressReporter>,
         params: GenerateWholeClipParams,
     ) -> Result<(), RecorderManagerError> {
+        // This runs inside the scheduled worker, not when the task is enqueued.
+        // Publish before any database/storage work so preparation is not shown
+        // as pending for the entire remote download.
+        if let Some(reporter) = reporter {
+            reporter.update("准备原始录播").await;
+        }
         if let Some(settings) = &params.render_settings {
             settings
                 .validate()
@@ -2108,6 +2131,7 @@ impl RecorderManager {
                 &room_id,
                 &parent_id,
                 selected_live_ids.as_deref(),
+                reporter,
             )
             .await?;
         if playlists.is_empty() {
@@ -2141,7 +2165,12 @@ impl RecorderManager {
         let danmu_options = self.config.read().await.danmu_ass_options.clone();
         let danmu_tracks = if encode_danmu {
             let mut tracks = Vec::with_capacity(playlists.len());
-            for playlist in &playlists {
+            for (index, playlist) in playlists.iter().enumerate() {
+                if let Some(reporter) = reporter {
+                    reporter
+                        .update(&format!("加载弹幕 {}/{}", index + 1, playlists.len()))
+                        .await;
+                }
                 tracks.push(Some(
                     self.load_archive_danmus(platform, &room_id, &playlist.live_id)
                         .await?,
@@ -2184,6 +2213,9 @@ impl RecorderManager {
 
         let playlists_refs: Vec<&Path> = playlists.iter().map(|p| p.path.as_path()).collect();
 
+        if let Some(reporter) = reporter {
+            reporter.update("提取录播片段").await;
+        }
         log::info!("Concat playlists: {playlists_refs:?}");
         log::info!("Output path: {output_path:?}");
 
@@ -2206,6 +2238,9 @@ impl RecorderManager {
             }
         };
 
+        if let Some(reporter) = reporter {
+            reporter.update("读取成品信息").await;
+        }
         let size = std::fs::metadata(&output_path)
             .map_err(|_| RecorderManagerError::HLSError {
                 err: "Failed to get file metadata".into(),
@@ -2218,13 +2253,22 @@ impl RecorderManager {
             Err(e) => log::error!("Failed to get video metadata: {e}"),
         }
 
+        if let Some(reporter) = reporter {
+            reporter.update("生成封面").await;
+        }
         let _ = crate::ffmpeg::generate_thumbnail(
             &output_path,
             crate::ffmpeg::get_random_thumbnail_timestamp(duration),
         )
         .await;
+        if let Some(reporter) = reporter {
+            reporter.update("生成音频预览").await;
+        }
         let _ = crate::ffmpeg::extract_audio_sample(Path::new(&output_path)).await;
 
+        if let Some(reporter) = reporter {
+            reporter.update("保存素材").await;
+        }
         let video = self
             .db
             .add_video(&VideoRow {

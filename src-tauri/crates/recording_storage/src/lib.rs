@@ -4,11 +4,13 @@
 //! playlist and checkpoint. Local roots must be application-controlled: key
 //! validation rejects traversal, but is not a sandbox against concurrent symlink
 //! replacement by another process. Backends may be selected per recording.
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::{stream, TryStreamExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
@@ -29,6 +31,15 @@ pub use transfer::{
     TransferFile, TransferManifest,
 };
 pub use webdav::{WebDavBackend, WebDavConfig, WebDavCredentials};
+
+/// Actual progress copying selected objects into a local lease. The total byte
+/// count is not known up front; discovering it would require an extra stat pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MaterializationProgress {
+    pub completed_files: usize,
+    pub total_files: usize,
+    pub copied_bytes: u64,
+}
 
 fn invalid_key() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid recording object key")
@@ -1123,27 +1134,71 @@ impl RecordingStorage {
 
     /// Copy only the requested objects to an isolated lease for path-based tools.
     pub async fn materialize(&self, keys: &[String]) -> io::Result<LocalAssets> {
+        self.materialize_with_progress(keys, |_| async {}).await
+    }
+
+    /// Copy at most three distinct files concurrently, with sequential 1 MiB
+    /// reads within each file. Report before I/O, after each copied chunk and on
+    /// file completion. Observer calls are serialized; dropping the operation
+    /// cancels all downloads without leaving background workers/reporters.
+    pub async fn materialize_with_progress<F, Fut>(
+        &self,
+        keys: &[String],
+        mut report: F,
+    ) -> io::Result<LocalAssets>
+    where
+        F: FnMut(MaterializationProgress) -> Fut + Send,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
         for key in keys {
             validate_key(key)?;
         }
+        // Two workers must never truncate/append the same destination file.
+        let mut seen = HashSet::new();
+        let keys: Vec<_> = keys
+            .iter()
+            .map(String::as_str)
+            .filter(|key| seen.insert(*key))
+            .collect();
+        let progress = MaterializationProgress {
+            total_files: keys.len(),
+            ..Default::default()
+        };
+        report(progress).await;
         let assets = LocalAssets::new().await?;
-        for key in keys {
-            let size = self.size(key).await?;
-            assets.write(key, b"").await?;
-            let mut offset = 0;
-            while offset < size {
-                let end = offset.saturating_add(1024 * 1024).min(size);
-                let bytes = self.read_range(key, offset..end).await?;
-                if bytes.len() as u64 != end - offset {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "recording asset changed during materialization",
-                    ));
+        let updates = Mutex::new((progress, report));
+        let target = &assets;
+        let updates = &updates;
+        stream::iter(keys.into_iter().map(Ok::<_, io::Error>))
+            .try_for_each_concurrent(3, |key| async move {
+                let size = self.size(key).await?;
+                target.write(key, b"").await?;
+                let mut offset = 0;
+                while offset < size {
+                    let end = offset.saturating_add(1024 * 1024).min(size);
+                    let bytes = self.read_range(key, offset..end).await?;
+                    if bytes.len() as u64 != end - offset {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "recording asset changed during materialization",
+                        ));
+                    }
+                    target.append_chunk(key, &bytes).await?;
+                    offset = end;
+                    let mut update = updates.lock().await;
+                    update.0.copied_bytes += bytes.len() as u64;
+                    if offset < size {
+                        let snapshot = update.0;
+                        (update.1)(snapshot).await;
+                    }
                 }
-                assets.append_chunk(key, &bytes).await?;
-                offset = end;
-            }
-        }
+                let mut update = updates.lock().await;
+                update.0.completed_files += 1;
+                let snapshot = update.0;
+                (update.1)(snapshot).await;
+                Ok(())
+            })
+            .await?;
         Ok(assets)
     }
 

@@ -322,6 +322,7 @@ fn label(value: &str) -> Result<(), String> {
 
 struct FileInput {
     context: format::context::Input,
+    audio_replay: super::audio_replay::AudioReplay,
     offset: i64,
     seek_target: i64,
     eof: bool,
@@ -362,6 +363,7 @@ impl FileInput {
             seek_target.checked_neg().ok_or("媒体时间戳溢出")?
         };
         Ok(Self {
+            audio_replay: super::audio_replay::AudioReplay::new(&context),
             context,
             offset,
             seek_target,
@@ -1335,6 +1337,9 @@ impl Job {
             }
             Err(e) if util::again(e) => return Ok(true),
             Err(e) => return Err(util::error(&format!("读取媒体输入{index}失败"), e)),
+        }
+        if file.audio_replay.is_replay(&packet) {
+            return Ok(true);
         }
         let stream = packet.stream();
         let base = file

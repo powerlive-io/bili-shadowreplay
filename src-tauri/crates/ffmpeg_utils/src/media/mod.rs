@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 
 mod audio;
 mod audio_encoder;
+mod audio_replay;
 mod decode;
 mod execute;
 mod graph;
@@ -17,6 +18,7 @@ mod video;
 mod video_clock;
 mod video_encoder;
 mod video_processor;
+mod video_sar;
 
 #[cfg(test)]
 mod single_input_tests;

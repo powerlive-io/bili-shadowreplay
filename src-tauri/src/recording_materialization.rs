@@ -4,11 +4,13 @@
 //! inherited initialization maps. Only the selected media dependencies are copied.
 use std::collections::BTreeSet;
 use std::io;
+use std::time::{Duration, Instant};
 
 use m3u8_rs::MediaPlaylist;
 use recording_storage::{validate_key, LocalAssets, RecordingStorage};
 
 use crate::ffmpeg::Range;
+use crate::progress::progress_reporter::{ProgressReporter, ProgressReporterTrait};
 use crate::recorder_manager::RecorderManagerError;
 
 fn dependency_keys(playlist: &MediaPlaylist, ranges: &[Range]) -> io::Result<Vec<String>> {
@@ -64,6 +66,18 @@ pub(crate) async fn materialize(
     storage: &RecordingStorage,
     ranges: &[Range],
 ) -> Result<LocalAssets, RecorderManagerError> {
+    materialize_with_progress::<ProgressReporter>(storage, ranges, None, "准备录播").await
+}
+
+pub(crate) async fn materialize_with_progress<R: ProgressReporterTrait>(
+    storage: &RecordingStorage,
+    ranges: &[Range],
+    reporter: Option<&R>,
+    stage: &str,
+) -> Result<LocalAssets, RecorderManagerError> {
+    if let Some(reporter) = reporter {
+        reporter.update(&format!("{stage}：读取播放列表")).await;
+    }
     let bytes = storage.read("playlist.m3u8").await?;
     let (_, playlist) = m3u8_rs::parse_media_playlist(&bytes).map_err(|_| {
         RecorderManagerError::M3u8ParseFailed {
@@ -71,7 +85,29 @@ pub(crate) async fn materialize(
         }
     })?;
     let keys = dependency_keys(&playlist, ranges)?;
-    let assets = storage.materialize(&keys).await?;
+    let mut last_update: Option<Instant> = None;
+    let assets = storage
+        .materialize_with_progress(&keys, |progress| {
+            let publish = last_update
+                .is_none_or(|last| last.elapsed() >= Duration::from_millis(500))
+                || progress.completed_files == progress.total_files;
+            if publish {
+                last_update = Some(Instant::now());
+            }
+            async move {
+                if let Some(reporter) = reporter.filter(|_| publish) {
+                    reporter
+                        .update(&format!(
+                            "{stage}：{}/{} 文件，已读取 {:.1} MiB",
+                            progress.completed_files,
+                            progress.total_files,
+                            progress.copied_bytes as f64 / (1024.0 * 1024.0)
+                        ))
+                        .await;
+                }
+            }
+        })
+        .await?;
     // Do not re-read the manifest after copying: a live recording may advance.
     assets.write("playlist.m3u8", &bytes).await?;
     Ok(assets)
@@ -82,6 +118,92 @@ mod tests {
     use super::*;
 
     const PLAYLIST: &str = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\nfirst.m4s\n#EXTINF:2,\nsecond.m4s\n#EXT-X-MAP:URI=\"next.mp4\"\n#EXTINF:2,\nthird.m4s\n#EXT-X-ENDLIST\n";
+
+    #[derive(Clone, Default)]
+    struct Messages(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl ProgressReporterTrait for Messages {
+        async fn update(&self, content: &str) {
+            self.0.lock().unwrap().push(content.to_owned());
+        }
+
+        async fn finish(&self, _: bool, _: &str) {}
+    }
+
+    #[tokio::test]
+    async fn preparation_reports_before_io_and_keeps_the_final_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = RecordingStorage::local(directory.path());
+        let reporter = Messages::default();
+        assert!(
+            materialize_with_progress(&storage, &[], Some(&reporter), "准备录播 1/2")
+                .await
+                .is_err()
+        );
+        assert_eq!(*reporter.0.lock().unwrap(), ["准备录播 1/2：读取播放列表"]);
+        storage
+            .write(
+                "playlist.m3u8",
+                b"#EXTM3U\n#EXTINF:2,\na.ts\n#EXTINF:2,\nb.ts\n",
+            )
+            .await
+            .unwrap();
+        storage.write("a.ts", &vec![0; 1024 * 1024]).await.unwrap();
+        storage.write("b.ts", &vec![0; 1024 * 1024]).await.unwrap();
+        let assets = materialize_with_progress(&storage, &[], Some(&reporter), "准备录播 2/2")
+            .await
+            .unwrap();
+        assert_eq!(assets.read("b.ts").await.unwrap().len(), 1024 * 1024);
+        let messages = reporter.0.lock().unwrap();
+        assert!(messages.contains(&"准备录播 2/2：0/2 文件，已读取 0.0 MiB".into()));
+        assert_eq!(
+            messages.last().unwrap(),
+            "准备录播 2/2：2/2 文件，已读取 2.0 MiB"
+        );
+    }
+
+    #[tokio::test]
+    async fn preparation_persists_processing_even_before_the_manifest_is_read() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, type TEXT, status TEXT, message TEXT,
+                metadata TEXT, created_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let events = crate::events::EventBus::new();
+        let db = std::sync::Arc::new(crate::database::Database::new(
+            pool,
+            crate::database::credentials::CredentialCipher::new(&[0; 32]).unwrap(),
+            events.clone(),
+        ));
+        let task = db
+            .generate_task("generate_whole_clip", "", "{}")
+            .await
+            .unwrap();
+        let reporter = ProgressReporter::new(db.clone(), &events, &task.id)
+            .await
+            .unwrap();
+        assert_eq!(db.get_task(&task.id).await.unwrap().status, "pending");
+        let directory = tempfile::tempdir().unwrap();
+        let storage = RecordingStorage::local(directory.path());
+        assert!(
+            materialize_with_progress(&storage, &[], Some(&reporter), "准备录播 1/1")
+                .await
+                .is_err()
+        );
+        let task = db.get_task(&task.id).await.unwrap();
+        assert_eq!(task.status, "processing");
+        assert_eq!(task.message, "准备录播 1/1：读取播放列表");
+    }
 
     #[test]
     fn range_dependencies_include_inherited_init_without_changing_timeline() {
