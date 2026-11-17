@@ -52,6 +52,34 @@ FFmpeg 6/9 对照检查 MP4、MPEG-TS 的编码包、流头、时长提示和默
 
 取消测试要求先关闭网络输入，再释放工作线程持有的列表。应用测试还在空 `PATH` 下运行，并验证后续输入缺失时保留之前的输出。
 
+#### 非关键帧 copy 裁切的 Opus 失败复现
+
+`copy_concat_preroll_normalization_preserves_packets_and_allows_opus` 构造 42 秒 H.264（30 fps、2 秒 GOP、B 帧）+ AAC（44.1/48 kHz）TS 文件，再通过原生媒体计划转封装、裁切、copy 合并、提取 Opus。三个选区为 `5.22–11.67`、`16.8–31.32`、`32.61–39.2559621565705` 秒，保留用户报告选区的长度和相对 GOP 偏移；没有插入 HLS 重传分片。此测试不经过应用的播放列表选段或界面。
+
+在 FFmpeg 9.0.2 上，单段提取成功，直接合并后的 Opus 提取出现 `Queue input is backward in time` 和非递增 DTS 错误。合并前各段存在负时间戳前滚数据，合并时与前段尾部重叠，写出 MP4 时被压成相邻的一个时基刻度，但 AAC 包仍解码为完整的 1024 个样本。它与 HLS 重传的下游现象相似，但不是相同包重传，不能用重传去重来修复。
+
+应用的素材 copy 路径在合并前，对每个裁切文件以 `NegativeTs::MakeZero` 再转封装一次（等价于 `-c copy -avoid_negative_ts make_zero`），把前滚数据放回各自文件的实际时间轴，再合并。单选区也遵循同一规则。回归断言包括：
+
+- 每段音视频编码包数量、内容不变，音视频 PTS/DTS 按同一个时间偏移平移。
+- 合并后保留各段全部编码内容，AAC 包不再被挤成一个刻度。
+- 原生 Opus 提取成功，解码样本数与规整后的 MP4 音轨一致。
+
+此方案保留前滚内容，因而会改变可见起点和总时长；不能把它当作精确裁切。仅在最终已合并 MP4 上添加 `make_zero` 也不能恢复已被压缩的接缝时间戳。要求精确边界时应走解码裁切。
+
+原生复制执行器返回第一个保留视频包相对于输入视频起点的原始 PTS。素材保存实际录播区间及每段输出 `offset`，不再用“请求终点减视频时长”猜起点；拼接位置使用容器时长并考虑音频领先/延迟。弹幕采用这一映射，素材和工程采用实际播放时长。字幕识别、Opus 音频和波形采用播放时钟提取，编辑器 FLAC 预览在样本网格裁剪前保留内部间隙，详见[音频回归测试](audio.md)。
+
+应用测试 `copy_material_timing_handles_preroll_repeats_and_recording_edges` 覆盖录播开头、单选区、报告中的三个选区、重复选区和超过文件尾部的请求，检查实际覆盖终点、输出位置、弹幕时间映射和 WAV/Opus 样本时钟。另有 CLI 逐包/逐帧对照验证复制内容及输出时间戳。旧素材的已保存字幕和录播区间不会自动重写。
+
+从仓库根目录运行并保留生成文件（不设置环境变量时使用自动清理的临时目录）：
+
+```sh
+BSR_COPY_CONCAT_REPRO_DIR="$PWD/src-tauri/target/opus-copy-repro" \
+  cargo test --manifest-path src-tauri/Cargo.toml -p ffmpeg_utils \
+  copy_concat_preroll_normalization_preserves_packets_and_allows_opus -- --nocapture
+```
+
+产物按 `44100/`、`48000/` 分目录：`cut-*.mp4` 为原始裁切，`joined.mp4` 为触发问题的合并文件，`normalized-*.mp4` 为前滚规整方案的片段及合并文件，`normalized-joined.opus` 为成功提取的音频。`list.txt` 和 `normalized-list.txt` 可用于 CLI 对照。测试打印原流程的实际结果，但不要求它永远失败；未来修复独立音频管线后，copy 方案的包内容与时间轴断言仍然有效。
+
 ## 字幕、共享滤镜图与项目渲染
 
 ### 原生 Skia 字幕

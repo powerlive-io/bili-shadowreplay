@@ -4,14 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-use ffmpeg_utils::{decode_audio, AudioDecodeOptions, AudioSink};
+use ffmpeg_utils::{decode_audio_timeline, AudioDecodeOptions, AudioSink};
 use recorder::danmu::DanmuEntry;
 use serde::{Deserialize, Serialize};
 
 /// Waveform resolution of [`Peaks`].
 pub const PEAKS_PER_SECOND: u32 = 50;
 const PEAKS_SAMPLE_RATE: u32 = 8000;
-const PEAKS_VERSION: u32 = 1;
+const PEAKS_VERSION: u32 = 2;
 
 pub fn danmu_path(video: &Path) -> PathBuf {
     video.with_extension("danmu.json")
@@ -115,11 +115,12 @@ impl AudioSink for PeakSink {
 }
 
 async fn compute_peaks(video: &Path) -> Result<Peaks, String> {
-    let decoded = decode_audio(
+    let decoded = decode_audio_timeline(
         video,
         AudioDecodeOptions {
             sample_rate: PEAKS_SAMPLE_RATE,
         },
+        None,
         PeakSink::default(),
     )
     .await?;

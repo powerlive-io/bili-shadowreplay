@@ -6,17 +6,15 @@ use tokio::io::AsyncWriteExt;
 
 use crate::progress::progress_reporter::ProgressReporterTrait;
 
-use super::Range;
+use super::{ClipTiming, Range};
 
 /// Cut `ranges` from a playlist and join them into `output_path`, returning the
 /// recording ranges the output covers.
 ///
-/// A stream-copied cut keeps the packets up to the keyframe before its start
-/// behind an edit list and runs a little past its end. Without encoding options
-/// or a transition, the pieces are joined by stream copy. Explicit encoding
-/// applies those edit lists before joining. A single range is only remuxed,
-/// so it is returned as asked for the caller to measure. The join targets
-/// `bitrate` (kbps) when given.
+/// Copy cuts expose retained keyframe preroll before concat, preventing later
+/// inputs' negative timestamps from overlapping the previous cut. Coverage is
+/// measured from retained input packets and actual container clocks, including
+/// audio lead/tail and B-frame reorder delay. Encoding keeps accurate edit lists.
 pub async fn clip_multiple_with_settings(
     reporter: Option<&impl ProgressReporterTrait>,
     playlist_path: &Path,
@@ -25,7 +23,7 @@ pub async fn clip_multiple_with_settings(
     transition: Option<&str>,
     bitrate: Option<NonZeroU32>,
     settings: Option<&crate::project::RenderSettings>,
-) -> Result<Vec<Range>, String> {
+) -> Result<Vec<ClipTiming>, String> {
     if let Some(settings) = settings {
         settings.validate()?;
     }
@@ -42,6 +40,7 @@ pub async fn clip_multiple_with_settings(
         && (transition.is_none() || transition == Some("none"));
     let mut clips = Vec::with_capacity(count);
     let mut covered = Vec::with_capacity(count);
+    let mut offset = 0.0;
 
     for (i, range) in ranges.iter().enumerate() {
         let video_path = temp_dir.path().join(format!("clip-{i}.mp4"));
@@ -51,30 +50,73 @@ pub async fn clip_multiple_with_settings(
             "提取片段".to_string()
         };
         let extracting = reporter.map(|reporter| reporter.stage(&stage));
-        clip_from_playlist(
+        let retained_start = clip_from_playlist_with_timing(
             extracting.as_ref(),
             playlist_path,
             &video_path,
             Some(range.clone()),
         )
         .await?;
-        let duration = match ffmpeg_utils::extract_video_metadata(&video_path).await {
-            Ok(metadata) if count > 1 && metadata.duration > 0.0 => metadata.duration,
-            _ => range.duration(),
-        };
-        covered.push(if copy && count > 1 {
-            // Each copied range can include the preceding keyframe. Keep
-            // external danmaku aligned with those retained packets.
-            Range {
-                start: (range.end - duration).max(0.0),
-                end: range.end,
+        let (source, duration, leading) = if copy {
+            let normalized = temporary_output_path(&video_path)?;
+            let mut plan = super::clip::single_input_plan(
+                &video_path,
+                &normalized,
+                ffmpeg_utils::StreamMode::Copy,
+                ffmpeg_utils::StreamMode::Copy,
+            );
+            plan.outputs[0].negative_ts = ffmpeg_utils::NegativeTs::MakeZero;
+            for route in &mut plan.routes {
+                route.mode = ffmpeg_utils::StreamMode::Copy;
             }
+            super::runner::run_native_media(
+                plan,
+                super::runner::ProgressMode::None,
+                "规整复制片段时间轴",
+                extracting.as_ref(),
+            )
+            .await?;
+            replace_output(&video_path, normalized).await?;
+            let probe = ffmpeg_utils::probe_media(&video_path).await?;
+            let duration = probe
+                .container_duration
+                .filter(|duration| duration.is_finite() && *duration > 0.0)
+                .ok_or("复制片段缺少有效容器时长")?;
+            let video_start = probe.video_start_time.ok_or("复制片段缺少视频起点")?;
+            let container_start = probe.container_start_time.ok_or("复制片段缺少容器起点")?;
+            let origin = retained_start.ok_or("无法确定复制片段的录播起点")?
+                - (video_start - container_start);
+            // Audio can precede the first picture. Do not label negative
+            // recording time as source content; preserve its output delay.
+            (
+                Range {
+                    start: origin.max(0.0),
+                    end: origin + duration,
+                },
+                duration,
+                (-origin).max(0.0),
+            )
         } else {
-            Range {
-                start: range.start,
-                end: range.start + duration,
-            }
+            let duration = ffmpeg_utils::extract_video_metadata(&video_path)
+                .await?
+                .duration;
+            (
+                Range {
+                    start: range.start,
+                    end: range.start + duration,
+                },
+                duration,
+                0.0,
+            )
+        };
+        covered.push(ClipTiming {
+            source,
+            offset: offset + leading,
         });
+        offset += duration;
+        if super::applies_clip_transition(transition, count) {
+            offset -= super::TRANSITION_DURATION_SECS;
+        }
         clips.push(video_path);
     }
 
@@ -110,6 +152,19 @@ pub async fn clip_from_playlist(
     output_path: &Path,
     range: Option<Range>,
 ) -> Result<(), String> {
+    clip_from_playlist_with_timing(reporter, playlist_path, output_path, range)
+        .await
+        .map(|_| ())
+}
+
+/// Return the recording timestamp of the first retained video packet, rather
+/// than assuming every extra output millisecond belongs before the selection.
+async fn clip_from_playlist_with_timing(
+    reporter: Option<&impl ProgressReporterTrait>,
+    playlist_path: &Path,
+    output_path: &Path,
+    range: Option<Range>,
+) -> Result<Option<f64>, String> {
     let playlist_bytes = tokio::fs::read(playlist_path)
         .await
         .map_err(|e| format!("Failed to read playlist '{}': {e}", playlist_path.display()))?;
@@ -198,7 +253,7 @@ pub async fn clip_from_playlist(
     // Trim for the precise requested duration.
     if let (Some(start_offset), Some(range)) = (start_offset, range.as_ref()) {
         let tmp_output_path = temporary_output_path(output_path)?;
-        super::trim_video(
+        let result = super::clip::trim_video_with_timing(
             reporter,
             output_path,
             &tmp_output_path,
@@ -207,9 +262,12 @@ pub async fn clip_from_playlist(
         )
         .await?;
         replace_output(output_path, tmp_output_path).await?;
+        return Ok(result
+            .copied_video_start
+            .map(|start| range.start - start_offset + start));
     }
 
-    Ok(())
+    Ok(Some(0.0))
 }
 
 fn parse_media_playlist(bytes: &[u8], playlist_path: &Path) -> Result<MediaPlaylist, String> {
@@ -667,10 +725,10 @@ seg-3.mp4
         .await
         .unwrap();
 
-        // Keep the returned recording boundaries tied to each measured cut.
-        // The copy path deliberately retains concat demuxer/edit-list behavior.
-        // Compare with CLI stream copy rather than a decoded concat filter.
+        // Compare against a copy-only CLI reference with the same per-cut
+        // normalization. Container spans, not video durations, place the cuts.
         let mut reference_cuts = Vec::new();
+        let mut expected_offset = 0.0;
         for (index, (covered, asked)) in covered.iter().zip(&ranges).enumerate() {
             let cut = dir.path().join(format!("reference-cut-{index}.mp4"));
             clip_from_playlist(
@@ -681,10 +739,33 @@ seg-3.mp4
             )
             .await
             .unwrap();
-            let metadata = ffmpeg_utils::extract_video_metadata(&cut).await.unwrap();
-            assert_eq!(covered.start, (asked.end - metadata.duration).max(0.0));
-            assert_eq!(covered.end, asked.end);
-            reference_cuts.push(cut);
+            let normalized = dir.path().join(format!("normalized-{index}.mp4"));
+            let result = ffmpeg_utils::ffmpeg_command()
+                .args(["-i"])
+                .arg(&cut)
+                .args(["-c", "copy", "-avoid_negative_ts", "make_zero", "-y"])
+                .arg(&normalized)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let probe = ffmpeg_utils::probe_media(&normalized).await.unwrap();
+            let origin = (asked.start / 2.0).floor() * 2.0 - probe.video_start_time.unwrap()
+                + probe.container_start_time.unwrap();
+            assert!(
+                (covered.source.start - origin).abs() < 0.001,
+                "{covered:?}, origin={origin}"
+            );
+            assert!(
+                (covered.source.end - origin - probe.container_duration.unwrap()).abs() < 0.001
+            );
+            assert!((covered.offset - expected_offset).abs() < 0.001);
+            expected_offset += probe.container_duration.unwrap();
+            reference_cuts.push(normalized);
         }
         let oracle = dir.path().join("cli-joined.mp4");
         join_cli_reference(&reference_cuts, &oracle).await;
@@ -706,8 +787,117 @@ seg-3.mp4
             .duration;
         assert_eq!(joined, expected, "joined metadata duration");
         for (covered, asked) in covered.iter().zip(&ranges) {
-            assert!(covered.start <= asked.start + 0.05, "{covered:?} {asked:?}");
-            assert_eq!(covered.end, asked.end);
+            assert!(covered.source.start <= asked.start, "{covered:?} {asked:?}");
+            assert!(covered.source.end >= asked.end, "{covered:?} {asked:?}");
+        }
+        super::super::audio::extract_audio_sample(&output)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn copy_material_timing_handles_preroll_repeats_and_recording_edges() {
+        type Reporter = crate::progress::progress_reporter::ProgressReporter;
+        let dir = tempfile::tempdir().unwrap();
+        let playlist = create_test_playlist(dir.path(), 42.0).await;
+        let cases = [
+            vec![Range {
+                start: 0.0,
+                end: 1.2,
+            }],
+            vec![Range {
+                start: 5.22,
+                end: 11.67,
+            }],
+            vec![
+                Range {
+                    start: 5.22,
+                    end: 11.67,
+                },
+                Range {
+                    start: 16.8,
+                    end: 31.32,
+                },
+                Range {
+                    start: 32.61,
+                    end: 39.2559621565705,
+                },
+            ],
+            vec![
+                Range {
+                    start: 5.22,
+                    end: 11.67
+                };
+                2
+            ],
+            vec![Range {
+                start: 41.4,
+                end: 45.0,
+            }],
+        ];
+        for (index, ranges) in cases.iter().enumerate() {
+            let output = dir.path().join(format!("case-{index}.mp4"));
+            let timing = clip_multiple_with_settings(
+                None::<&Reporter>,
+                &playlist,
+                &output,
+                ranges,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(timing.len(), ranges.len());
+            for segment in &timing {
+                assert!(segment.source.start >= 0.0);
+                assert!(segment.source.end > segment.source.start);
+                let event = (segment.source.start * 1000.0).round() as i64 + 30;
+                assert_eq!(
+                    segment.map_millis(event),
+                    Some((segment.offset * 1000.0).round() as i64 + 30)
+                );
+            }
+            let probe = ffmpeg_utils::probe_media(&output).await.unwrap();
+            let last = timing.last().unwrap();
+            let actual_end = last.offset + last.source.duration();
+            assert!(
+                (actual_end - probe.container_duration.unwrap()).abs() < 0.002,
+                "{index}: {timing:?}, {probe:?}"
+            );
+            if index == 4 {
+                assert!(
+                    last.source.end < 42.2,
+                    "EOF must not be inferred from requested end"
+                );
+            }
+            let opus = super::super::audio::extract_audio_sample(&output)
+                .await
+                .unwrap();
+            let wav = super::super::audio::extract_full_audio(&output)
+                .await
+                .unwrap();
+            let mut wav = hound::WavReader::open(wav).unwrap();
+            let wave_samples = wav.samples::<i16>().count() as u64;
+            struct Count;
+            impl ffmpeg_utils::AudioSink for Count {
+                fn write(&mut self, _: &[i16]) -> Result<(), String> {
+                    Ok(())
+                }
+            }
+            let opus = ffmpeg_utils::decode_audio(
+                &opus,
+                ffmpeg_utils::AudioDecodeOptions {
+                    sample_rate: 16_000,
+                },
+                Count,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                opus.samples, wave_samples,
+                "subtitle PCM and Opus sidecar must use the same clock"
+            );
         }
     }
 

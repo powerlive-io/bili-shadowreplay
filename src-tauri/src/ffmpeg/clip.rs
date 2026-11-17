@@ -355,6 +355,7 @@ pub(super) mod encoding_tests {
 }
 
 /// Trim a video without re-encoding its streams.
+#[cfg(test)]
 pub async fn trim_video<R: ProgressReporterTrait>(
     reporter: Option<&R>,
     file: &Path,
@@ -362,6 +363,18 @@ pub async fn trim_video<R: ProgressReporterTrait>(
     start_time: f64,
     duration: f64,
 ) -> Result<(), String> {
+    trim_video_with_timing(reporter, file, output_path, start_time, duration)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn trim_video_with_timing<R: ProgressReporterTrait>(
+    reporter: Option<&R>,
+    file: &Path,
+    output_path: &Path,
+    start_time: f64,
+    duration: f64,
+) -> Result<ffmpeg_utils::MediaJobResult, String> {
     log::info!("Trim video task start: {}", file.display());
     let mut plan = single_input_plan(file, output_path, StreamMode::Copy, StreamMode::Copy);
     plan.inputs[0].seek = Some(InputSeek {
@@ -388,7 +401,6 @@ pub async fn trim_video<R: ProgressReporterTrait>(
         reporter,
     )
     .await
-    .map(|_| ())
 }
 
 /// Cut a video range and encode it with the selected hardware/software encoder.

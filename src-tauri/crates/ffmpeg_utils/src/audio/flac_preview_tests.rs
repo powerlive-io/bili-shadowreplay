@@ -5,7 +5,7 @@ use super::{
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-// The former CLI graph is deliberately kept here as the independent oracle.
+// An independent CLI oracle, including playback-clock gap repair.
 fn filters(timing: AudioTiming, range: AudioRange) -> String {
     let rate = timing.sample_rate;
     let origin = timing.start;
@@ -16,7 +16,7 @@ fn filters(timing: AudioTiming, range: AudioRange) -> String {
     };
     let from = (range.start * f64::from(rate)).round() as i64;
     let to = from + (range.duration * f64::from(rate)).round() as i64;
-    format!("asettb=1/{rate},asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},asetpts=PTS-STARTPTS,aresample=48000,asetnsamples=n=4096:p=0")
+    format!("asettb=1/{rate},aresample={rate}:async=1:min_hard_comp=0.001,asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},asetpts=PTS-STARTPTS,aresample=48000,asetnsamples=n=4096:p=0")
 }
 
 async fn timing(path: &Path) -> AudioTiming {
@@ -26,6 +26,33 @@ async fn timing(path: &Path) -> AudioTiming {
         start: (audio.start_time.unwrap_or(0.0) * f64::from(audio.sample_rate)).round() as i64,
         aac: audio.codec == "aac",
     }
+}
+
+#[tokio::test]
+async fn preview_keeps_internal_gaps_before_sample_grid_trimming() {
+    if !has_cli() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("gapped.mp4");
+    super::timeline_tests::delayed_gapped_audio(&source);
+    let timing = timing(&source).await;
+    let range = AudioRange {
+        start: 0.0,
+        duration: 4.0,
+    };
+    let native = directory.path().join("native.flac");
+    let oracle = directory.path().join("oracle.flac");
+    encode_flac_preview(&source, &native, timing, range, 0.2)
+        .await
+        .unwrap();
+    cli_preview(&source, &oracle, timing, range, 0.2, Some(4096));
+    let actual = snapshot(&native);
+    assert_eq!(actual, snapshot(&oracle));
+    assert!(actual.samples.len() as f64 / (48_000.0 * 2.0) > 3.38);
+    assert!(actual.samples[115_200..124_800]
+        .iter()
+        .all(|sample| *sample == 0));
 }
 
 fn cli_preview(

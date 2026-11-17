@@ -450,18 +450,12 @@ fn unused_output_path(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
-/// The recording ranges a material really covers. Stream copy starts a cut at
-/// the keyframe before the requested start while the end stays where it was
-/// asked, so a single-range material begins `duration - requested` earlier.
-/// Multiple ranges already have their copy/encode boundaries measured by the cut.
-fn actual_material_ranges(ranges: &[ffmpeg::Range], duration: f64) -> Vec<ffmpeg::Range> {
-    match ranges {
-        [range] if duration - range.duration() > 0.05 => vec![ffmpeg::Range {
-            start: (range.end - duration).max(0.0),
-            end: range.end,
-        }],
-        _ => ranges.to_vec(),
-    }
+async fn material_playback_duration(file: &Path) -> Result<f64, String> {
+    let probe = ffmpeg_utils::probe_media(file).await?;
+    Ok(probe
+        .container_duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .unwrap_or(probe.metadata.duration))
 }
 
 /// Cut `params.ranges` of a recording into a new material, together with the
@@ -487,17 +481,22 @@ pub(crate) async fn create_material(
         .await?;
     log::info!("Clip range done, doing post processing");
     reporter.update("正在保存素材").await;
-    let duration = match ffmpeg_utils::extract_video_metadata(&file).await {
-        Ok(video) if video.duration > 0.0 => video.duration,
-        _ => covered.iter().map(|r| r.duration()).sum::<f64>(),
+    let duration = match material_playback_duration(&file).await {
+        Ok(duration) if duration > 0.0 => duration,
+        _ => covered
+            .last()
+            .map_or(0.0, |r| r.offset + r.source.duration()),
     };
-    let ranges = actual_material_ranges(&covered, duration);
-    let source_params = ClipRangeParams {
-        ranges: ranges.clone(),
-        ..params.clone()
-    };
+    let ranges = covered
+        .iter()
+        .map(|segment| segment.source.clone())
+        .collect();
     let mut danmu_embedded = false;
-    match state.recorder_manager.material_danmus(&source_params).await {
+    match state
+        .recorder_manager
+        .material_danmus(params, &covered)
+        .await
+    {
         Ok(danmus) if params.danmu => {
             // Super chats are not drawn, so they alone leave nothing to burn.
             if danmus.iter().any(DanmuEntry::is_danmu) {
@@ -545,8 +544,8 @@ pub(crate) async fn create_material(
     }
     // Burning re-encodes the material; the ranges above still describe the cut.
     let duration = if danmu_embedded || final_encode {
-        match ffmpeg_utils::extract_video_metadata(&file).await {
-            Ok(video) if video.duration > 0.0 => video.duration,
+        match material_playback_duration(&file).await {
+            Ok(duration) if duration > 0.0 => duration,
             _ => duration,
         }
     } else {
@@ -606,6 +605,7 @@ pub(crate) async fn create_material(
     let source = crate::database::video::MaterialSource {
         ranges,
         local_offset: params.local_offset,
+        timing: covered,
     };
     let video = state
         .db
@@ -2086,21 +2086,32 @@ mod material_range_tests {
     use super::*;
 
     #[test]
-    fn stream_copied_materials_start_at_the_keyframe_before_the_range() {
-        let range = |start, end| ffmpeg::Range { start, end };
-        let actual = actual_material_ranges(&[range(5.0, 15.0)], 10.983);
-        assert!((actual[0].start - 4.017).abs() < 1e-9 && actual[0].end == 15.0);
-        // A cut on a keyframe, or a re-encoded concatenation, is used as asked.
-        assert_eq!(
-            actual_material_ranges(&[range(30.0, 42.0)], 12.0)[0].start,
-            30.0
-        );
-        let two = actual_material_ranges(&[range(1.0, 2.0), range(5.0, 7.0)], 4.0);
-        assert_eq!((two[0].start, two[1].start), (1.0, 5.0));
-        assert_eq!(
-            actual_material_ranges(&[range(0.5, 3.0)], 4.0)[0].start,
-            0.0
-        );
+    fn material_source_retains_measured_placements_and_reads_legacy_rows() {
+        use crate::database::video::MaterialSource;
+        let legacy: MaterialSource =
+            serde_json::from_str(r#"{"ranges":[{"start":5.0,"end":15.0}],"local_offset":2}"#)
+                .unwrap();
+        assert!(legacy.timing.is_empty());
+        let timing = ffmpeg::ClipTiming {
+            source: ffmpeg::Range {
+                start: 3.95,
+                end: 11.72,
+            },
+            offset: 7.733333,
+        };
+        assert_eq!(timing.map_millis(3949), None);
+        assert_eq!(timing.map_millis(3950), Some(7733));
+        assert_eq!(timing.map_millis(5000), Some(8783));
+        assert_eq!(timing.map_millis(11720), None);
+        let source = MaterialSource {
+            ranges: vec![timing.source.clone()],
+            local_offset: 2,
+            timing: vec![timing],
+        };
+        let decoded: MaterialSource =
+            serde_json::from_str(&serde_json::to_string(&source).unwrap()).unwrap();
+        assert_eq!(decoded.timing[0].offset, 7.733333);
+        assert_eq!(decoded.ranges[0].start, 3.95);
     }
 }
 

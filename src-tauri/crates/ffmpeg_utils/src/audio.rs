@@ -16,9 +16,12 @@ use ffmpeg_next::{self as ffmpeg, codec, ffi, format, frame, media, Packet};
 use crate::metadata::{open_input, run_media};
 
 mod range;
-pub use range::{decode_audio_range, AudioRange};
+pub use range::{decode_audio_range, decode_audio_timeline, AudioRange};
 mod opus;
-pub use opus::{encode_opus_sample, encode_opus_upload};
+pub use opus::{
+    encode_opus_sample, encode_opus_sample_timeline, encode_opus_upload,
+    encode_opus_upload_timeline,
+};
 mod encode;
 mod queue;
 pub(crate) use encode::{copy_chapters, input_metadata};
@@ -37,6 +40,17 @@ pub trait AudioSink: Send + 'static {
     fn finish(&mut self) -> Result<(), String> {
         Ok(())
     }
+}
+
+/// One playback-clock rule for PCM used by recognition/waveforms and Opus
+/// sidecars/uploads. Hard padding/trimming preserves time without stretching
+/// speech; tolerate sub-millisecond timestamp quantization.
+fn timeline_resample(rate: Option<u32>, first_pts: Option<i64>) -> String {
+    let rate = rate.map(|rate| format!("{rate}:")).unwrap_or_default();
+    let first = first_pts
+        .map(|pts| format!(":first_pts={pts}"))
+        .unwrap_or_default();
+    format!("aresample={rate}async=1:min_hard_comp=0.001{first}")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -498,3 +512,6 @@ mod import_tests;
 
 #[cfg(test)]
 mod mp3_tests;
+
+#[cfg(test)]
+mod timeline_tests;

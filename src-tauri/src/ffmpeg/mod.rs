@@ -20,7 +20,9 @@ mod subtitle_native;
 #[cfg(test)]
 pub(crate) use audio::get_audio_duration;
 pub use audio::{extract_audio_sample, extract_full_audio};
-pub use clip::{clip_from_video_file, transcode, trim_video};
+#[cfg(test)]
+pub use clip::trim_video;
+pub use clip::{clip_from_video_file, transcode};
 pub use danmu::{encode_video_danmu, encode_video_danmu_with_settings};
 pub use metadata::{
     check_ffmpeg, check_videos, extract_frame, generate_thumbnail, get_random_thumbnail_timestamp,
@@ -54,6 +56,24 @@ pub struct Range {
     pub end: f64,
 }
 
+/// Recording-time coverage placed on the material's actual playback clock.
+/// The offset is explicit: concat uses container spans, not video-only duration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipTiming {
+    pub source: Range,
+    pub offset: f64,
+}
+
+impl ClipTiming {
+    /// Half-open recording interval, mapped using measured output placement.
+    pub fn map_millis(&self, timestamp: i64) -> Option<i64> {
+        let start = (self.source.start * 1000.0).round() as i64;
+        let end = (self.source.end * 1000.0).round() as i64;
+        (start <= timestamp && timestamp < end)
+            .then(|| timestamp - start + (self.offset * 1000.0).round() as i64)
+    }
+}
+
 impl fmt::Display for Range {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}, {}]", self.start, self.end)
@@ -75,23 +95,6 @@ pub const TRANSITION_DURATION_SECS: f64 = 1.0;
 
 pub fn applies_clip_transition(transition: Option<&str>, clip_count: usize) -> bool {
     clip_count >= 2 && matches!(transition, Some(t) if t != "none")
-}
-
-/// Start timestamps (milliseconds) of each clip on the concatenated timeline.
-///
-/// Video transitions overlap adjacent clips by [`TRANSITION_DURATION_SECS`], so
-/// later danmaku must use the same shortened timeline rather than a simple sum.
-pub fn clip_timeline_anchors(ranges: &[Range], transition: Option<&str>) -> Vec<i64> {
-    let overlap_ms = if applies_clip_transition(transition, ranges.len()) {
-        (TRANSITION_DURATION_SECS * 1000.0) as i64
-    } else {
-        0
-    };
-    let mut anchors = vec![0i64; ranges.len()];
-    for i in 1..ranges.len() {
-        anchors[i] = (ranges[i - 1].duration() * 1000.0) as i64 + anchors[i - 1] - overlap_ms;
-    }
-    anchors
 }
 
 // 执行FFmpeg转换的通用函数
@@ -248,60 +251,32 @@ mod tests {
         assert_eq!(large_range.duration(), 1000.0);
     }
 
-    fn sample_ranges() -> Vec<Range> {
-        vec![
-            Range {
-                start: 0.0,
-                end: 10.0,
-            },
-            Range {
-                start: 50.0,
-                end: 60.0,
-            },
-            Range {
-                start: 100.0,
-                end: 110.0,
-            },
-        ]
+    #[test]
+    fn clip_timing_uses_actual_placement_including_gaps_or_transition_overlap() {
+        for offset in [0.0, 9.0, 10.027, 20.054] {
+            let timing = ClipTiming {
+                source: Range {
+                    start: 50.0,
+                    end: 60.0,
+                },
+                offset,
+            };
+            assert_eq!(timing.map_millis(49_999), None);
+            assert_eq!(
+                timing.map_millis(50_123),
+                Some((offset * 1000.0).round() as i64 + 123)
+            );
+            assert_eq!(timing.map_millis(60_000), None);
+        }
     }
 
     #[test]
-    fn clip_timeline_anchors_without_transition_sum_durations() {
-        assert_eq!(
-            clip_timeline_anchors(&sample_ranges(), None),
-            vec![0, 10_000, 20_000]
-        );
-        assert_eq!(
-            clip_timeline_anchors(&sample_ranges(), Some("none")),
-            vec![0, 10_000, 20_000]
-        );
-    }
-
-    #[test]
-    fn clip_timeline_anchors_with_transition_subtract_xfade_overlap() {
-        // 三段各 10s，转场各重叠 1s：0 / 9s / 18s
-        assert_eq!(
-            clip_timeline_anchors(&sample_ranges(), Some("fade")),
-            vec![0, 9_000, 18_000]
-        );
-        assert_eq!(
-            clip_timeline_anchors(&sample_ranges(), Some("dissolve")),
-            vec![0, 9_000, 18_000]
-        );
-    }
-
-    #[test]
-    fn clip_timeline_anchors_single_range_stays_at_zero_with_transition() {
-        let ranges = vec![Range {
-            start: 5.0,
-            end: 15.0,
-        }];
-        assert_eq!(clip_timeline_anchors(&ranges, Some("fade")), vec![0]);
-    }
-
-    #[test]
-    fn clip_timeline_anchors_empty_ranges() {
-        assert!(clip_timeline_anchors(&[], Some("fade")).is_empty());
+    fn only_multiple_clips_with_an_enabled_transition_overlap() {
+        for count in [0, 1, 2, 3] {
+            assert!(!applies_clip_transition(None, count));
+            assert!(!applies_clip_transition(Some("none"), count));
+            assert_eq!(applies_clip_transition(Some("fade"), count), count >= 2);
+        }
     }
 
     #[derive(Clone)]

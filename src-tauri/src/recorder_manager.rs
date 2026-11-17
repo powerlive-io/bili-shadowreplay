@@ -6,7 +6,7 @@ use crate::database::recorder::RecorderRow;
 use crate::database::video::VideoRow;
 use crate::database::{Database, DatabaseError};
 use crate::events::{DataChange, EventBus};
-use crate::ffmpeg::{clip_timeline_anchors, transcode, Range};
+use crate::ffmpeg::{transcode, ClipTiming, Range};
 use crate::progress::progress_reporter::{ProgressReporter, ProgressReporterTrait};
 use crate::subtitle_generator::{item_to_srt, powerlive::PowerLiveOptions, SubtitleGeneratorType};
 use crate::task::{Task, TaskManager, TaskPriority};
@@ -283,7 +283,7 @@ impl From<RecorderManagerError> for String {
 }
 
 async fn prepare_powerlive_audio(input: &Path, output: &Path) -> Result<(), RecorderManagerError> {
-    ffmpeg_utils::encode_opus_upload(input, output)
+    ffmpeg_utils::encode_opus_upload_timeline(input, output)
         .await
         .map_err(|error| RecorderManagerError::SubtitleGenerationFailed {
             error: format!("Failed to extract opus audio: {error}"),
@@ -1440,7 +1440,7 @@ impl RecorderManager {
         reporter: Option<&ProgressReporter>,
         clip_file: PathBuf,
         params: &ClipRangeParams,
-    ) -> Result<(PathBuf, Vec<Range>), RecorderManagerError> {
+    ) -> Result<(PathBuf, Vec<ClipTiming>), RecorderManagerError> {
         if let Some(settings) = &params.render_settings {
             settings
                 .validate()
@@ -1518,6 +1518,7 @@ impl RecorderManager {
     pub async fn material_danmus(
         &self,
         params: &ClipRangeParams,
+        timing: &[ClipTiming],
     ) -> Result<Vec<DanmuEntry>, RecorderManagerError> {
         let Ok(platform) = PlatformType::from_str(&params.platform) else {
             return Err(RecorderManagerError::InvalidPlatformType {
@@ -1539,38 +1540,22 @@ impl RecorderManager {
             d.ts -= stream_start_timestamp_milis + params.local_offset * 1000;
         }
 
-        if params.ranges.is_empty() {
+        if timing.is_empty() {
             danmus.retain(|d| d.ts >= 0);
             return Ok(danmus);
         }
 
-        let range_anchors = clip_timeline_anchors(&params.ranges, params.transition.as_deref());
-        log::debug!("Range anchors: {:?}", range_anchors);
         let mut filtered = Vec::new();
-        for (i, range) in params.ranges.iter().enumerate() {
-            filtered.extend(self.filter_danmus_in_range(danmus.clone(), range, range_anchors[i]));
+        for segment in timing {
+            filtered.extend(danmus.iter().filter_map(|entry| {
+                segment.map_millis(entry.ts).map(|ts| {
+                    let mut entry = entry.clone();
+                    entry.ts = ts;
+                    entry
+                })
+            }));
         }
         Ok(filtered)
-    }
-
-    fn filter_danmus_in_range(
-        &self,
-        mut danmus: Vec<DanmuEntry>,
-        range: &Range,
-        anchor: i64,
-    ) -> Vec<DanmuEntry> {
-        for d in &mut danmus {
-            d.ts -= (range.start * 1000.0) as i64;
-        }
-        if range.duration() > 0.0 {
-            danmus.retain(|x| x.ts >= 0 && x.ts <= (range.duration() * 1000.0).round() as i64);
-        }
-
-        for d in &mut danmus {
-            d.ts += anchor;
-        }
-
-        danmus
     }
 
     async fn load_archive_danmus(

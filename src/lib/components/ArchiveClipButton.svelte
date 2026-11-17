@@ -208,7 +208,7 @@
                           {formatTime(range.start)} → {formatTime(range.end)}
                         </div>
                         <div class="text-[11px] text-fg-muted">
-                          时长: {formatDuration(range.end - range.start)}
+                          选区时长: {formatDuration(range.end - range.start)}
                         </div>
                       </div>
                     </div>
@@ -220,7 +220,7 @@
                 {/each}
               </div>
               <div class="border-t border-line pt-2.5 text-[14px] font-semibold text-fg">
-                总时长: {formatDuration(
+                选区总时长: {formatDuration(
                   activeRanges.reduce(
                     (total, range) => total + range.end - range.start,
                     0,
@@ -328,7 +328,7 @@
                   ? "内嵌弹幕需要重新编码，无法取消"
                   : reencode
                     ? "按以下设置重新编码，耗时较长"
-                    : "保留原始编码，直接复制并拼接片段"}
+                    : "无损复制，从可解码的关键帧开始，起点可能提前、结尾可能多出几帧；弹幕和字幕按实际播放时间对齐"}
               </p>
               <RenderSettingsFields bind:value={renderSettings} streamCopy={!embedDanmu && !reencode} />
             </div>

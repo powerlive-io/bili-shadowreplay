@@ -38,7 +38,46 @@ pub async fn decode_audio_range<S: AudioSink>(
     let duration = parse_seconds(range.duration)?;
     let path = path.to_path_buf();
     run_media(move |cancelled| {
-        decode_range_sync(&path, options.sample_rate, start, duration, sink, cancelled)
+        decode_range_sync(
+            &path,
+            options.sample_rate,
+            start,
+            duration,
+            false,
+            sink,
+            cancelled,
+        )
+    })
+    .await
+}
+
+/// Mono PCM on the media playback clock, including leading silence and gaps.
+/// Subtitles and waveforms must not concatenate samples across copied joins.
+/// A range uses the same container-relative playback clock as a full decode.
+pub async fn decode_audio_timeline<S: AudioSink>(
+    path: &Path,
+    options: AudioDecodeOptions,
+    range: Option<AudioRange>,
+    sink: S,
+) -> Result<AudioDecodeResult<S>, String> {
+    if !(1..=384_000).contains(&options.sample_rate) {
+        return Err("音频采样率必须在 1 到 384000 之间".into());
+    }
+    let (start, duration) = match range {
+        Some(range) => (parse_seconds(range.start)?, parse_seconds(range.duration)?),
+        None => (0, i64::MAX),
+    };
+    let path = path.to_path_buf();
+    run_media(move |cancelled| {
+        decode_range_sync(
+            &path,
+            options.sample_rate,
+            start,
+            duration,
+            true,
+            sink,
+            cancelled,
+        )
     })
     .await
 }
@@ -67,6 +106,7 @@ fn decode_range_sync<S: AudioSink>(
     rate: u32,
     start: i64,
     duration: i64,
+    timeline: bool,
     mut sink: S,
     cancelled: Arc<AtomicBool>,
 ) -> Result<AudioDecodeResult<S>, String> {
@@ -114,7 +154,9 @@ fn decode_range_sync<S: AudioSink>(
     // As in the CLI, an unsuccessful seek is not by itself fatal. Subsequent
     // accurate trimming can still produce an empty result or read an input
     // whose demuxer cannot seek. Native I/O errors remain errors below.
-    let _seek_result = input.seek(seek, ..seek);
+    if !timeline || start > 0 {
+        let _seek_result = input.seek(seek, ..seek);
+    }
     check_cancelled(&cancelled)?;
     let stream = input.stream(index).ok_or("找不到音轨")?;
     let packet_time_base: ffi::AVRational = stream.time_base().into();
@@ -135,7 +177,7 @@ fn decode_range_sync<S: AudioSink>(
             packet_time_base,
         )
     };
-    let mut output = RangeOutput::new(rate, duration, sink, cancelled.clone());
+    let mut output = RangeOutput::new(rate, duration, timeline, sink, cancelled.clone());
     decode_frames(
         &mut input,
         index,
@@ -269,6 +311,7 @@ struct RangeOutput<S> {
     sink: S,
     rate: u32,
     duration: i64,
+    timeline: bool,
     samples: u64,
     graph: Option<filter::Graph>,
     format: Option<AudioFormat>,
@@ -278,11 +321,12 @@ struct RangeOutput<S> {
 }
 
 impl<S: AudioSink> RangeOutput<S> {
-    fn new(rate: u32, duration: i64, sink: S, cancelled: Arc<AtomicBool>) -> Self {
+    fn new(rate: u32, duration: i64, timeline: bool, sink: S, cancelled: Arc<AtomicBool>) -> Self {
         Self {
             sink,
             rate,
             duration,
+            timeline,
             samples: 0,
             graph: None,
             format: None,
@@ -316,7 +360,13 @@ impl<S: AudioSink> RangeOutput<S> {
             self.format = None;
         }
         if self.graph.is_none() {
-            self.graph = Some(make_graph(frame, &format, self.rate, self.duration)?);
+            self.graph = Some(make_graph(
+                frame,
+                &format,
+                self.rate,
+                self.duration,
+                self.timeline.then_some(self.samples),
+            )?);
             self.format = Some(format);
         }
         // Own/copy unspecified layouts before submitting, just as the CLI
@@ -428,6 +478,7 @@ fn make_graph(
     format: &AudioFormat,
     rate: u32,
     duration: i64,
+    timeline_start: Option<u64>,
 ) -> Result<filter::Graph, String> {
     let mut description = vec![0 as c_char; 256];
     let length = unsafe {
@@ -475,7 +526,21 @@ fn make_graph(
     // ffmpeg_filter.c inserts input accurate-seek trim before format
     // negotiation, and output duration trim after format negotiation. Duration
     // is parsed as integer microseconds to retain CLI sub-sample rounding.
-    let spec = format!("atrim=start_pts=0,aformat=sample_fmts=s16:sample_rates={rate}:channel_layouts=mono,atrim=durationi={duration}us");
+    let mut spec = match timeline_start {
+        Some(start) => format!(
+            "atrim=start_pts=0,{},aformat=sample_fmts=s16:sample_rates={rate}:channel_layouts=mono",
+            super::timeline_resample(
+                Some(rate),
+                Some(i64::try_from(start).map_err(|_| "音频时间戳溢出")?)
+            ),
+        ),
+        None => format!(
+            "atrim=start_pts=0,aformat=sample_fmts=s16:sample_rates={rate}:channel_layouts=mono"
+        ),
+    };
+    if duration != i64::MAX {
+        spec.push_str(&format!(",atrim=durationi={duration}us"));
+    }
     graph
         .output("in", 0)
         .and_then(|parser| parser.input("out", 0))

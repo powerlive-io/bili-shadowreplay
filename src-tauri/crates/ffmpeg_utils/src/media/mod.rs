@@ -389,6 +389,10 @@ pub struct MediaJobResult {
     pub video_frames: u64,
     pub audio_samples: u64,
     pub processed: f64,
+    /// First copied video packet's original PTS, relative to the input video
+    /// stream's start. Includes seek preroll; never inferred from output length.
+    /// Only supplied by the single-input stream-copy executor.
+    pub copied_video_start: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

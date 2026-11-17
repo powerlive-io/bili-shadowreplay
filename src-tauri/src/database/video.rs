@@ -47,6 +47,9 @@ pub struct MaterialSource {
     pub ranges: Vec<crate::ffmpeg::Range>,
     #[serde(default)]
     pub local_offset: i64,
+    /// Actual placements in material seconds. Older rows only have ranges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timing: Vec<crate::ffmpeg::ClipTiming>,
 }
 
 impl Database {

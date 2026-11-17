@@ -90,9 +90,11 @@ fn preview_filters(timing: AudioTiming, range: AudioRange) -> Result<String, Str
     } else {
         format!("round(STARTPTS)-({origin})")
     };
-    // aformat is the CLI's output negotiation, after the user filter graph.
-    // Keeping it after asetnsamples preserves resampling and block boundaries.
-    Ok(format!("asettb=1/{rate},asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},asetpts=PTS-STARTPTS,aresample={RATE},asetnsamples=n=4096:p=0,aformat=sample_fmts=s16:sample_rates={RATE}:channel_layouts=stereo"))
+    // Repair gaps before counting samples on the editor's AAC grid. Do not
+    // pad to zero here: the player separately applies the first audio offset.
+    let timeline = super::timeline_resample(Some(rate), None);
+    // aformat is output negotiation, after the fixed-size preview blocks.
+    Ok(format!("asettb=1/{rate},{timeline},asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},asetpts=PTS-STARTPTS,aresample={RATE},asetnsamples=n=4096:p=0,aformat=sample_fmts=s16:sample_rates={RATE}:channel_layouts=stereo"))
 }
 
 fn encode_sync(

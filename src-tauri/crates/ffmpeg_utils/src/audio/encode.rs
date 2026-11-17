@@ -71,11 +71,21 @@ pub(super) async fn encode(
     output: &Path,
     profile: EncodeProfile,
 ) -> Result<(), String> {
+    encode_with_timing(input, output, profile, false).await
+}
+
+pub(super) async fn encode_with_timing(
+    input: &Path,
+    output: &Path,
+    profile: EncodeProfile,
+    timeline: bool,
+) -> Result<(), String> {
     let input = input.to_path_buf();
     let output = output.to_path_buf();
     let publish_path = output.clone();
     let temporary =
-        run_media(move |cancelled| encode_sync(&input, &output, profile, cancelled)).await?;
+        run_media(move |cancelled| encode_sync(&input, &output, profile, timeline, cancelled))
+            .await?;
     temporary
         .persist(&publish_path)
         .map_err(|error| native_error("发布音频失败", error.error))?;
@@ -86,6 +96,7 @@ fn encode_sync(
     input_path: &Path,
     output_path: &Path,
     profile: EncodeProfile,
+    timeline: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<NamedTempFile, String> {
     if input_path == output_path
@@ -163,6 +174,7 @@ fn encode_sync(
         profile,
         global,
         metadata,
+        timeline,
         cancelled.clone(),
     )?;
     copy_chapters(&input, &mut output.muxer.output, origin)?;
@@ -215,6 +227,8 @@ struct AudioEncoder {
     queue: AudioFrameQueue,
     metadata: Option<Dictionary<'static>>,
     clock: AudioClock,
+    timeline: bool,
+    next_pts: i64,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -224,6 +238,7 @@ impl AudioEncoder {
         profile: EncodeProfile,
         global: Dictionary<'static>,
         metadata: Dictionary<'static>,
+        timeline: bool,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let mut muxer = NativeOutput::new(path, profile.muxer(), cancelled.clone())?;
@@ -238,6 +253,8 @@ impl AudioEncoder {
             queue: AudioFrameQueue::default(),
             metadata: Some(metadata),
             clock: AudioClock::new(),
+            timeline,
+            next_pts: 0,
             cancelled,
         })
     }
@@ -385,7 +402,13 @@ impl AudioEncoder {
     }
 
     fn configure(&mut self, frame: &frame::Audio, format: AudioFormat) -> Result<(), String> {
-        let mut graph = make_graph(frame, &format, self.profile, self.encoder_format.as_ref())?;
+        let mut graph = make_graph(
+            frame,
+            &format,
+            self.profile,
+            self.encoder_format.as_ref(),
+            self.timeline.then_some(self.next_pts),
+        )?;
         if self.encoder.is_none() {
             let mut output = graph.get("out").ok_or("音频滤镜输出不存在")?;
             let mut negotiated = AudioFormat {
@@ -449,6 +472,11 @@ impl AudioEncoder {
                 den: self.encoder_format.as_ref().unwrap().sample_rate,
             };
             frame.set_pts(Some(unsafe { ffi::av_rescale_q(pts, base, sample_base) }));
+            self.next_pts = frame
+                .pts()
+                .unwrap()
+                .checked_add(frame.samples() as i64)
+                .ok_or("音频时间戳溢出")?;
             unsafe {
                 (*frame.as_mut_ptr()).time_base = sample_base;
                 (*frame.as_mut_ptr()).duration = frame.samples() as i64;
@@ -564,6 +592,7 @@ fn make_graph(
     format: &AudioFormat,
     profile: EncodeProfile,
     locked: Option<&AudioFormat>,
+    timeline_start: Option<i64>,
 ) -> Result<filter::Graph, String> {
     let layout = describe_layout(&format.layout)?;
     let mut graph = filter::Graph::new();
@@ -636,6 +665,10 @@ fn make_graph(
                 spec
             }
         }
+    };
+    let spec = match timeline_start {
+        Some(start) => format!("{},{spec}", super::timeline_resample(None, Some(start))),
+        None => spec,
     };
     graph
         .output("in", 0)

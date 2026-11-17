@@ -805,6 +805,7 @@ fn execute(
         flags,
     };
     mux.header(&mut routes, &input)?;
+    let mut copied_video_start = None;
     let mut audio_replay = super::audio_replay::AudioReplay::new(&input);
     loop {
         util::check(&cancelled)?;
@@ -826,6 +827,7 @@ fn execute(
         if audio_replay.is_replay(&packet) {
             continue;
         }
+        let original_pts = packet.pts();
         let offset =
             unsafe { ffi::av_rescale_q(offset_us, util::MICROS, routes[index].base.into()) };
         if let Some(pts) = packet.pts() {
@@ -886,6 +888,13 @@ fn execute(
                 {
                     Vec::new()
                 } else {
+                    if state.medium == media::Type::Video && copied_video_start.is_none() {
+                        let origin = source_stream.start_time();
+                        if let Some(pts) = original_pts.filter(|_| origin != ffi::AV_NOPTS_VALUE) {
+                            copied_video_start =
+                                Some((pts as f64 - origin as f64) * f64::from(route_base));
+                        }
+                    }
                     state.started = true;
                     if packet.dts().is_none() {
                         packet.set_dts(Some(unsafe {
@@ -985,6 +994,7 @@ fn execute(
             video_frames,
             audio_samples,
             processed: progress.processed,
+            copied_video_start,
         },
         progress,
         _resources: std::mem::take(&mut plan.resources),

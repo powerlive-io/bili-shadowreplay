@@ -28,9 +28,10 @@ compile_error!("The vulkan-video backend requires a 64-bit target");
 pub mod vulkan_video;
 
 pub use audio::{
-    decode_audio, decode_audio_range, encode_flac_preview, encode_mp3, encode_opus_sample,
-    encode_opus_upload, import_audio, AudioDecodeOptions, AudioDecodeResult, AudioRange, AudioSink,
-    AudioTiming, ImportAudioMode,
+    decode_audio, decode_audio_range, decode_audio_timeline, encode_flac_preview, encode_mp3,
+    encode_opus_sample, encode_opus_sample_timeline, encode_opus_upload,
+    encode_opus_upload_timeline, import_audio, AudioDecodeOptions, AudioDecodeResult, AudioRange,
+    AudioSink, AudioTiming, ImportAudioMode,
 };
 pub use capabilities::{
     available_video_encoders, linked_ffmpeg_version, video_is_sdr_bt709, video_supports_gpu_sdr,

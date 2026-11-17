@@ -27,6 +27,226 @@ fn file_entry(path: &Path) -> String {
     )
 }
 
+#[tokio::test]
+async fn copy_concat_preroll_normalization_preserves_packets_and_allows_opus() {
+    if !has_cli() {
+        return;
+    }
+    for rate in [44_100, 48_000] {
+        assert_copy_concat_preroll(rate).await;
+    }
+}
+
+async fn assert_copy_concat_preroll(rate: u32) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.ts");
+    cli(
+        &strings(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=160x90:r=30:d=42",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=sample_rate={rate}:duration=42"),
+            "-c:v",
+            "libx264",
+            "-threads:v",
+            "1",
+            "-bf",
+            "3",
+            "-g",
+            "60",
+            "-keyint_min",
+            "60",
+            "-sc_threshold",
+            "0",
+            "-c:a",
+            "aac",
+        ]),
+        &source,
+    );
+    // The CLI only creates the fixture. Remux, input seeking, duration limits,
+    // concat and sidecar extraction use the application's native media paths.
+    let remuxed = directory.path().join("source.mp4");
+    execute_media_plan(
+        plan(&source, &remuxed, StreamMode::Copy, StreamMode::Copy),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut list = String::new();
+    // The reported ranges, shifted by whole GOPs into a short synthetic source.
+    for (index, (start, end)) in [(5.22, 11.67), (16.8, 31.32), (32.61, 39.2559621565705)]
+        .into_iter()
+        .enumerate()
+    {
+        let cut = directory.path().join(format!("cut-{index}.mp4"));
+        let mut request = plan(&remuxed, &cut, StreamMode::Copy, StreamMode::Copy);
+        request.inputs[0].seek = Some(InputSeek {
+            seconds: start,
+            accurate: true,
+        });
+        request.outputs[0].duration = Some(end - start);
+        execute_media_plan(request, None).await.unwrap();
+        crate::encode_opus_sample(&cut, &cut.with_extension("opus"))
+            .await
+            .unwrap();
+        list.push_str(&file_entry(&cut));
+    }
+    let filelist = directory.path().join("list.txt");
+    fs::write(&filelist, list).unwrap();
+    let joined = directory.path().join("joined.mp4");
+    execute_media_plan(concat_plan(&filelist, &joined), None)
+        .await
+        .unwrap();
+    // Negative preroll from the next cut overlaps the previous cut. The mux
+    // clamp produces increasing DTS, but cannot shorten the AAC sample blocks.
+    let before = snapshot(&joined);
+    let audio = before
+        .streams
+        .iter()
+        .find(|s| s.kind == media::Type::Audio)
+        .unwrap();
+    assert!(audio.packets.iter().any(|packet| packet.duration == 1));
+    let failure = crate::encode_opus_sample(&joined, &joined.with_extension("opus")).await;
+    // Report the original failure without requiring it forever: a future
+    // sidecar fix may accept the same overlapping MP4, but must not weaken the
+    // packet-preservation checks on the copy-only alternative below.
+    eprintln!("{rate} Hz, original copy sidecar: {failure:?}");
+    if let Err(error) = failure {
+        assert!(error.contains("写入音频编码包失败"), "{error}");
+        assert!(!joined.with_extension("opus").exists());
+    }
+
+    let mut normalized_list = String::new();
+    let mut normalized_movies = Vec::new();
+    for index in 0..3 {
+        let cut = directory.path().join(format!("cut-{index}.mp4"));
+        let normalized = directory.path().join(format!("normalized-{index}.mp4"));
+        // Equivalent to -c copy -avoid_negative_ts make_zero on EACH cut,
+        // before concat has clamped away the overlapping timestamps.
+        let mut request = plan(&cut, &normalized, StreamMode::Copy, StreamMode::Copy);
+        request.outputs[0].negative_ts = NegativeTs::MakeZero;
+        execute_media_plan(request, None).await.unwrap();
+        let original = snapshot(&cut);
+        let shifted = snapshot(&normalized);
+        let mut common_shift = None::<f64>;
+        for (original, shifted) in original.streams.iter().zip(&shifted.streams) {
+            assert_eq!(original.codec, shifted.codec);
+            assert_eq!(original.time_base, shifted.time_base);
+            assert_eq!(original.packets.len(), shifted.packets.len());
+            let offset = shifted.packets[0].dts.unwrap() - original.packets[0].dts.unwrap();
+            let seconds = offset as f64 * original.time_base.0 as f64 / original.time_base.1 as f64;
+            if let Some(previous) = common_shift {
+                assert!((seconds - previous).abs() < 1.0 / f64::from(rate));
+            }
+            common_shift = Some(seconds);
+            for (original, shifted) in original.packets.iter().zip(&shifted.packets) {
+                assert_eq!(
+                    original.payload, shifted.payload,
+                    "copy must not change coded content"
+                );
+                assert_eq!(shifted.pts.unwrap() - original.pts.unwrap(), offset);
+                assert_eq!(shifted.dts.unwrap() - original.dts.unwrap(), offset);
+            }
+        }
+        normalized_movies.push(shifted);
+        normalized_list.push_str(&file_entry(&normalized));
+    }
+    let normalized_filelist = directory.path().join("normalized-list.txt");
+    fs::write(&normalized_filelist, normalized_list).unwrap();
+    let normalized_join = directory.path().join("normalized-joined.mp4");
+    execute_media_plan(concat_plan(&normalized_filelist, &normalized_join), None)
+        .await
+        .unwrap();
+    let after = snapshot(&normalized_join);
+    for (stream_index, stream) in after.streams.iter().enumerate() {
+        let originals: Vec<_> = normalized_movies
+            .iter()
+            .flat_map(|movie| &movie.streams[stream_index].packets)
+            .collect();
+        assert_eq!(stream.packets.len(), originals.len());
+        for (actual, original) in stream.packets.iter().zip(originals) {
+            if stream.kind == media::Type::Video {
+                assert_eq!(
+                    coded_nals(actual, &stream.extradata),
+                    coded_nals(original, &stream.extradata)
+                );
+            } else {
+                assert_eq!(actual.payload, original.payload);
+            }
+        }
+        assert!(stream.packets.windows(2).all(|p| p[1].dts > p[0].dts));
+        if stream.kind == media::Type::Audio {
+            // Allow a sample of rational rounding, not a whole decoded frame
+            // squeezed into one timestamp tick at a join.
+            assert!(stream
+                .packets
+                .windows(2)
+                .all(|p| p[1].pts.unwrap() - p[0].pts.unwrap() >= 1023));
+        }
+        let duration =
+            stream.duration as f64 * stream.time_base.0 as f64 / stream.time_base.1 as f64;
+        eprintln!(
+            "{rate} Hz, normalized {:?} duration: {duration:.6}",
+            stream.kind
+        );
+    }
+    let opus = normalized_join.with_extension("opus");
+    crate::encode_opus_sample(&normalized_join, &opus)
+        .await
+        .unwrap();
+    struct Discard;
+    impl crate::AudioSink for Discard {
+        fn write(&mut self, _: &[i16]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let options = crate::AudioDecodeOptions {
+        sample_rate: 16_000,
+    };
+    let expected = crate::decode_audio(&normalized_join, options, Discard)
+        .await
+        .unwrap();
+    let actual = crate::decode_audio(&opus, options, Discard).await.unwrap();
+    assert_eq!(
+        actual.samples, expected.samples,
+        "Opus must retain all normalized audio samples"
+    );
+    assert_clean(directory.path());
+
+    // Explicit opt-in keeps binary fixtures out of Git and normal test runs.
+    if let Some(root) = std::env::var_os("BSR_COPY_CONCAT_REPRO_DIR") {
+        let output = PathBuf::from(root).join(rate.to_string());
+        fs::create_dir_all(&output).unwrap();
+        for entry in fs::read_dir(directory.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("ts" | "mp4" | "opus")
+            ) {
+                fs::copy(&path, output.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+        for prefix in ["", "normalized-"] {
+            let list: String = (0..3)
+                .map(|index| {
+                    let name = if prefix.is_empty() {
+                        format!("cut-{index}.mp4")
+                    } else {
+                        format!("normalized-{index}.mp4")
+                    };
+                    file_entry(Path::new(&name))
+                })
+                .collect();
+            fs::write(output.join(format!("{prefix}list.txt")), list).unwrap();
+        }
+        eprintln!("Retained copy-concat fixtures: {}", output.display());
+    }
+}
+
 fn coded_nals<'a>(packet: &'a CodedPacket, extradata: &[u8]) -> Vec<&'a [u8]> {
     let length_size = usize::from((extradata[4] & 3) + 1);
     let mut bytes = packet.payload.as_slice();

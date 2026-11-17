@@ -6,9 +6,11 @@ use std::{
 
 use tempfile::{tempdir_in, Builder, NamedTempFile, TempDir};
 
+#[cfg(test)]
+use ffmpeg_utils::decode_audio;
 pub(crate) use ffmpeg_utils::AudioTiming;
 use ffmpeg_utils::{
-    decode_audio, decode_audio_range, encode_flac_preview, encode_opus_sample, probe_media,
+    decode_audio_timeline, encode_flac_preview, encode_opus_sample_timeline, probe_media,
     AudioDecodeOptions, AudioRange, AudioSink, AudioStreamMetadata,
 };
 
@@ -19,7 +21,7 @@ const CHUNK_SAMPLES: usize = TRANSCRIPTION_SAMPLE_RATE as usize * 30;
 pub async fn extract_audio_sample(file: &Path) -> Result<PathBuf, String> {
     log::info!("Extract audio sample task start: {}", file.display());
     let output_path = file.with_extension("opus");
-    encode_opus_sample(file, &output_path).await?;
+    encode_opus_sample_timeline(file, &output_path).await?;
     log::info!("Extract audio sample task end: {}", output_path.display());
     Ok(output_path)
 }
@@ -43,11 +45,12 @@ pub(crate) async fn extract_audio_chunks_guarded(file: &Path) -> Result<TempDir,
         .file_stem()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("Invalid output file name: {}", output_path.display()))?;
-    let decoded = decode_audio(
+    let decoded = decode_audio_timeline(
         file,
         AudioDecodeOptions {
             sample_rate: TRANSCRIPTION_SAMPLE_RATE,
         },
+        None,
         WavChunkSink {
             current: None,
             directory,
@@ -168,10 +171,7 @@ async fn write_native_wav(
         sample_rate: TRANSCRIPTION_SAMPLE_RATE,
     };
     let sink = WavSink::new(directory)?;
-    let decoded = match range {
-        Some(range) => decode_audio_range(file, options, range, sink).await?,
-        None => decode_audio(file, options, sink).await?,
-    };
+    let decoded = decode_audio_timeline(file, options, range, sink).await?;
     if !decoded.has_audio {
         return Err("WAV extraction failed: input has no audio stream".into());
     }
@@ -278,7 +278,7 @@ fn preview_audio_filters(timing: AudioTiming, start: f64, duration: f64) -> Stri
     let from = (start * f64::from(rate)).round() as i64;
     let to = from + (duration * f64::from(rate)).round() as i64;
     format!(
-        "asettb=1/{rate},asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},\
+        "asettb=1/{rate},aresample={rate}:async=1:min_hard_comp=0.001,asetpts='{first}+N',atrim=start_pts={from}:end_pts={to},\
          asetpts=PTS-STARTPTS,aresample=48000,asetnsamples=n=4096:p=0"
     )
 }
@@ -359,12 +359,12 @@ mod preview_audio_tests {
 
         assert_eq!(
             preview_audio_filters(aac.unwrap(), 50.0, 10.0),
-            "asettb=1/48000,asetpts='round((STARTPTS-(0))/1024)*1024+N',\
+            "asettb=1/48000,aresample=48000:async=1:min_hard_comp=0.001,asetpts='round((STARTPTS-(0))/1024)*1024+N',\
              atrim=start_pts=2400000:end_pts=2880000,asetpts=PTS-STARTPTS,\
              aresample=48000,asetnsamples=n=4096:p=0"
         );
         assert!(preview_audio_filters(mp3, 10.0, 10.0)
-            .starts_with("asettb=1/44100,asetpts='round(STARTPTS)-(1105)+N',atrim=start_pts=441000:end_pts=882000"));
+            .starts_with("asettb=1/44100,aresample=44100:async=1:min_hard_comp=0.001,asetpts='round(STARTPTS)-(1105)+N',atrim=start_pts=441000:end_pts=882000"));
     }
 
     #[tokio::test]

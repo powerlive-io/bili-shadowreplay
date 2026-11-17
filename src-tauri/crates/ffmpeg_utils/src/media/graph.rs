@@ -1833,6 +1833,7 @@ impl Job {
         let result = MediaJobResult {
             outputs: self.plan.outputs.iter().map(|o| o.path.clone()).collect(),
             video_frames,
+            copied_video_start: None,
             audio_samples,
             processed: self.progress.processed,
         };
