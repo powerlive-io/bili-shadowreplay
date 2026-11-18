@@ -71,7 +71,7 @@
   // The row menu is viewport-fixed so sticky cells and the table's scroll box cannot clip it.
   let menuPlacement: { top: number; right: number; up: boolean } | null = $state(null);
   let menuEl = $state<HTMLDivElement | null>(null);
-  let menuTrigger: HTMLButtonElement | null = null;
+  let menuAnchor: { trigger: HTMLButtonElement; rect: DOMRect } | null = null;
   // A pointerdown that dismisses the menu also ends in a click; keep that click
   // from reaching a dialog backdrop that would close the whole dialog.
   let suppressClickUntil = 0;
@@ -227,7 +227,8 @@
     const restoreFocus = menuEl?.contains(document.activeElement) ?? false;
     openMenuArchiveKey = null;
     menuPlacement = null;
-    if (restoreFocus) menuTrigger?.focus({ preventScroll: true });
+    if (restoreFocus) menuAnchor?.trigger.focus({ preventScroll: true });
+    menuAnchor = null;
   }
 
   // A fixed menu inside the transformed page anchors to the page box, not the
@@ -251,9 +252,18 @@
     const estimatedHeight = 170; // four menu rows plus padding
     const block = fixedContainingBlock(trigger);
     const opensUp = rect.bottom + gap + estimatedHeight > window.innerHeight && rect.top - gap - estimatedHeight > 0;
-    menuTrigger = trigger;
+    menuAnchor = { trigger, rect };
     menuPlacement = { top: (opensUp ? rect.top - gap : rect.bottom + gap) - block.top, right: Math.max(8, block.right - rect.right), up: opensUp };
     openMenuArchiveKey = key;
+  }
+
+  function handleMenuScroll() {
+    if (!menuAnchor) return;
+    // A scroll notification can arrive after the click that already measured
+    // its result, or come from a different scroller. Neither moved the anchor.
+    const { trigger, rect } = menuAnchor;
+    const current = trigger.getBoundingClientRect();
+    if (!trigger.isConnected || current.top !== rect.top || current.right !== rect.right) closeActionMenu();
   }
 
   function handlePointerDown(event: PointerEvent) {
@@ -293,7 +303,7 @@
 </script>
 
 <svelte:window onkeydowncapture={handleMenuKeydown} onkeydown={handleDeleteKeydown} onclickcapture={handleClickCapture}
-  onpointerdown={handlePointerDown} onscrollcapture={() => { if (openMenuArchiveKey) closeActionMenu(); }} onresize={closeActionMenu} />
+  onpointerdown={handlePointerDown} onscrollcapture={handleMenuScroll} onresize={closeActionMenu} />
 
 {#snippet deleteSelectedButton()}
   <button class="ui-btn ui-btn-danger" disabled={selectedUnavailable} title={selectedUnavailable ? "选中项包含存储不可用的录播，无法删除文件；请先取消选择这些记录" : "删除选中的录播及文件"} onclick={() => { archiveToDelete = null; showDeleteConfirm = true; }}>
