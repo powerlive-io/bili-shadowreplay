@@ -70,12 +70,14 @@ async function invoke<T>(
       return;
     }
 
+    // Tauri takes named arguments; the HTTP agent handler takes AgentRequest directly.
+    const body = command === "agent_chat" ? args?.request : args;
     let response = await fetch(`${ENDPOINT}/api/${command}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(args || {}),
+      body: JSON.stringify(body || {}),
     });
 
     // if status is 405, it means the command is not allowed
