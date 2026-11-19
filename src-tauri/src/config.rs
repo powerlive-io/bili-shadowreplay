@@ -615,6 +615,12 @@ impl Config {
     }
 
     pub fn generate_clip_name(&self, params: &ClipRangeParams) -> PathBuf {
+        if let Some(stem) = &params.output_stem {
+            let stem = sanitize_filename::sanitize(stem.trim());
+            if !stem.is_empty() {
+                return Path::new(&self.output).join(format!("{stem}.mp4"));
+            }
+        }
         // get format config
         // filter special characters from title to make sure file name is valid
         let title = params

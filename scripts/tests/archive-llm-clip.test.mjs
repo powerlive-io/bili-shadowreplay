@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { recordingStorage } from "./recording-storage-fixture.mjs";
 
 function deferred() {
   let resolve, reject;
@@ -34,14 +35,8 @@ async function fixture({ commands = {} } = {}) {
   const requests = [], calls = [];
   const cancelled = new Set();
   let nextId = 0;
+  const archive = { title: "Archive", room_id: "1", live_id: "2", platform: "bilibili", length: 3600 };
   const context = vm.createContext({
-    $state: (value) => value,
-    $derived: (value) => value,
-    $props: () => ({
-      archive: { title: "Archive", room_id: "1", live_id: "2", platform: "bilibili", length: 3600 },
-      menu: false,
-      onaction: () => {},
-    }),
     localStorage: { getItem: () => null },
     alert: (message) => alerts.push(message),
     // Poll delays resolve immediately so the bounded loop finishes instantly.
@@ -60,7 +55,7 @@ async function fixture({ commands = {} } = {}) {
       },
     },
     "../archives": { archiveKey: (a) => `${a.platform}:${a.room_id}:${a.live_id}` },
-    "lucide-svelte": { AlertCircle() {}, CheckCircle2() {}, Loader2() {}, Scissors() {} },
+    "../recording-storage": recordingStorage,
     "../interface": {
       generateEventId: () => `llm-clip-${++nextId}`,
       generateMaterials: (eventId, params) => {
@@ -88,14 +83,10 @@ async function fixture({ commands = {} } = {}) {
       wasCancelled: (id) => cancelled.has(id),
     },
   };
-  // The flow lives in a <script module> block (shared state and unload guard)
-  // plus the instance block; concatenate both so they share one scope.
   const source = await readFile(new URL("../../src/lib/components/ArchiveLlmClipButton.svelte", import.meta.url), "utf8");
   const moduleScript = source.match(/<script module lang="ts">([\s\S]*?)<\/script>/)[1];
-  const instanceScript = source.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
   const output = ts.transpileModule(`${moduleScript}
-${instanceScript}
-    export { generateLlmClips, llmClipStates as states, activeLlmClipRuns as activeRuns };
+    export { llmClipStates as states };
   `, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
@@ -112,7 +103,9 @@ ${instanceScript}
   });
   await module.evaluate();
   return {
-    handlers: module.namespace, alerts, announced, opened, settled, requests, calls,
+    handlers: { generateLlmClips: (options = { danmu: true, renderSettings: { codec: "hevc" }, namePrefix: "" }) =>
+      module.namespace.generateLlmClips(archive, options) },
+    alerts, announced, opened, settled, requests, calls,
     cancelled, added, removed,
     // Registered when a run starts; the same module-level handler is reused.
     unloadHandler: () => added.at(-1)?.[1],
@@ -141,6 +134,37 @@ async function settleRequests(f, outcome) {
   }
 }
 
+test("opening and dismissing the confirmation does not start a run", async () => {
+  const calls = [];
+  const archive = { title: "Archive", length: 3600 };
+  const context = vm.createContext({
+    $state: value => value, $derived: value => value,
+    $props: () => ({ archive, onclose: () => calls.push("close") }),
+  });
+  const deps = {
+    "../page-visibility": { pageVisibility: () => () => true },
+    "../project-timeline": { defaultRenderSettings: () => ({ codec: "hevc", bitrate_kbps: 10000 }) },
+    "../recording-storage": recordingStorage,
+    "./ArchiveLlmClipButton.svelte": { llmClipRunning: () => false, generateLlmClips: (_, options) => calls.push(options) },
+  };
+  const source = await readFile(new URL("../../src/lib/components/ArchiveLlmClipModal.svelte", import.meta.url), "utf8");
+  const script = source.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
+  const module = new vm.SourceTextModule(ts.transpileModule(`${script}
+    export { handleKeydown, confirm };
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText, { context });
+  await module.link(name => new vm.SyntheticModule(Object.keys(deps[name]), function () {
+    for (const [key, value] of Object.entries(deps[name])) this.setExport(key, value);
+  }, { context }));
+  await module.evaluate();
+  assert.deepEqual(calls, []);
+  module.namespace.handleKeydown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(calls, ["close"]);
+  module.namespace.confirm();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.slice(1))), [
+    { danmu: true, renderSettings: { codec: "hevc", bitrate_kbps: 10000 }, namePrefix: "" }, "close",
+  ]);
+});
+
 test("reuses a successful summary and clips each highlight with danmu", async () => {
   const f = await fixture({ commands: { get_archive_summary: () => summary() } });
   const completion = f.handlers.generateLlmClips();
@@ -155,7 +179,8 @@ test("reuses a successful summary and clips each highlight with danmu", async ()
   // so the structural comparison does not trip on cross-realm prototypes.
   assert.deepEqual(JSON.parse(JSON.stringify(first.params.ranges)), [{ start: 10, end: 70 }]);
   assert.equal(first.params.danmu, true);
-  assert.equal(first.params.fix_encoding, false);
+  assert.equal(first.params.fix_encoding, true);
+  assert.equal(first.params.output_stem, undefined);
   assert.equal(first.params.local_offset, 0);
   assert.equal(first.params.cover, "");
   assert.equal(JSON.parse(f.announced[0].metadata).create_project, false);
@@ -179,6 +204,25 @@ test("reuses a successful summary and clips each highlight with danmu", async ()
   // The unload guard is released once the run finishes.
   assert.equal(f.added.length, 1);
   assert.equal(f.removed.length, 1);
+});
+
+test("applies confirmed output settings to every highlight and rejects duplicate starts", async () => {
+  for (const renderSettings of [undefined, { resolution: "2k", codec: "h264", priority: "quality", bitrate_kbps: 16000 }]) {
+    const f = await fixture({ commands: { get_archive_summary: () => summary() } });
+    const options = { danmu: false, renderSettings, namePrefix: "连麦精选" };
+    const completion = f.handlers.generateLlmClips(options);
+    await f.handlers.generateLlmClips(options);
+    await tick();
+    await settleRequests(f, (request) => request.resolve({ id: 1 }));
+    await completion;
+    assert.equal(f.commandsCalled("get_archive_summary").length, 1);
+    assert.deepEqual(f.requests.map(r => r.params.output_stem), ["连麦精选-01", "连麦精选-02"]);
+    for (const { params } of f.requests) {
+      assert.equal(params.danmu, false);
+      assert.equal(params.fix_encoding, !!renderSettings);
+      assert.deepEqual(params.render_settings, renderSettings);
+    }
+  }
 });
 
 test("submits a new summary when none exists and polls until it succeeds", async () => {
@@ -255,7 +299,7 @@ test("surfaces the original submit error when no summary ever appears", async ()
   await f.handlers.generateLlmClips();
   assert.equal(f.state().phase, "failed");
   assert.equal(f.state().message, "生成 Summary 失败：数据库不可用");
-  assert.deepEqual(f.alerts, ["LLM 切片生成失败：生成 Summary 失败：数据库不可用"]);
+  assert.deepEqual(f.alerts, ["智能切片生成失败：生成 Summary 失败：数据库不可用"]);
   assert.deepEqual(f.requests, []);
   assert.equal(f.removed.length, 1);
 });

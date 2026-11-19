@@ -12,7 +12,7 @@
   import { pageVisibility } from "../page-visibility";
   import { createStateRefresh, watchStateChanges } from "../state-refresh";
   import { defaultRenderSettings } from "../project-timeline";
-  import RenderSettingsFields from "./RenderSettingsFields.svelte";
+  import ArchiveEncodingFields from "./ArchiveEncodingFields.svelte";
 
   interface Props {
     showModal?: boolean;
@@ -396,38 +396,7 @@
             {/if}
           </div>
           <div class="min-w-0 space-y-3 border-t border-line pt-4">
-            <div class="flex items-center justify-between gap-4">
-              <label class="flex items-center gap-2 text-[12px] text-fg-secondary">
-                <input
-                  type="checkbox"
-                  class="ui-checkbox"
-                  checked={encodeDanmu || reencode}
-                  onchange={(event) => (reencode = event.currentTarget.checked)}
-                  disabled={encodeDanmu || isLoading || isSubmitting}
-                />
-                <span>重新编码</span>
-              </label>
-              <label class="flex cursor-pointer items-center gap-2 text-[12px] text-fg-secondary">
-                <span>内嵌弹幕</span>
-                <span class="ui-switch">
-                  <input
-                    type="checkbox"
-                    class="left-0 top-0"
-                    bind:checked={encodeDanmu}
-                    disabled={isLoading || isSubmitting}
-                  />
-                  <span></span>
-                </span>
-              </label>
-            </div>
-            <p class="ui-hint">
-              {encodeDanmu
-                ? "内嵌弹幕需要重新编码，无法取消"
-                : reencode
-                  ? "按以下设置重新编码，耗时较长"
-                  : "分辨率一致时直接复制；不一致时自动重新编码，统一到最大片段尺寸"}
-            </p>
-            <RenderSettingsFields layout="columns" bind:value={renderSettings} streamCopy={!encodeDanmu && !reencode} originalResolutionSource="largest" disabled={isLoading || isSubmitting} showHint={encodeDanmu || reencode} />
+            <ArchiveEncodingFields bind:encodeDanmu bind:reencode bind:renderSettings wholeRecording disabled={isLoading || isSubmitting} />
             {#if !encodeDanmu && !reencode && selectedLiveIds.length > 1}
               <p class="ui-hint">最大片段按画面像素面积判断，面积相同时以最先出现的片段为准；其它片段等比缩放并补黑边。</p>
             {/if}

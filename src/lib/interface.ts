@@ -649,6 +649,8 @@ export interface Range {
 export interface ClipRangeParams {
   title: string;
   note: string;
+  /** Optional material filename without extension; otherwise use the configured naming rule. */
+  output_stem?: string;
   cover: string;
   platform: string;
   room_id: string;

@@ -35,6 +35,9 @@ pub async fn clip_multiple_with_settings(
     let temp_dir = tempdir_in(output_dir)
         .map_err(|e| format!("Failed to create playlist clip directory: {e}"))?;
     let count = ranges.len();
+    // Single-range materials apply explicit settings later (when burning
+    // danmaku or finalizing). Measure the remuxed timeline here either way.
+    let settings = settings.filter(|_| count > 1);
     let copy = settings.is_none()
         && bitrate.is_none()
         && (transition.is_none() || transition == Some("none"));
@@ -139,7 +142,7 @@ pub async fn clip_multiple_with_settings(
             output_path,
             transition,
             bitrate,
-            settings.filter(|_| count > 1),
+            settings,
         )
         .await?;
     }
@@ -849,6 +852,24 @@ seg-3.mp4
             .await
             .unwrap();
             assert_eq!(timing.len(), ranges.len());
+            if index == 1 {
+                // Non-keyframe single highlight: a later explicit encode must
+                // map danmaku to the same retained frames as a copy export.
+                let explicit = clip_multiple_with_settings(
+                    None::<&Reporter>,
+                    &playlist,
+                    &dir.path().join("deferred-encode.mp4"),
+                    ranges,
+                    None,
+                    None,
+                    Some(&crate::project::RenderSettings::default()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(explicit[0].source.start, timing[0].source.start);
+                assert_eq!(explicit[0].source.end, timing[0].source.end);
+                assert_eq!(explicit[0].offset, timing[0].offset);
+            }
             for segment in &timing {
                 assert!(segment.source.start >= 0.0);
                 assert!(segment.source.end > segment.source.start);
