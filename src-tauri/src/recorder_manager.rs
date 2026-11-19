@@ -84,6 +84,8 @@ pub struct ArchiveRecord {
 pub struct ClipRangeParams {
     pub title: String,
     pub note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_stem: Option<String>,
     pub cover: String,
     pub platform: String,
     pub room_id: String,
