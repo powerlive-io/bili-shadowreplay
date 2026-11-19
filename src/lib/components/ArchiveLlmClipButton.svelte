@@ -1,5 +1,11 @@
 <script module lang="ts">
   import { SvelteMap } from "svelte/reactivity";
+  import { archiveKey } from "../archives";
+  import type { RecordItem, RecordSummary, SummaryHighlight } from "../db";
+  import { generateEventId, generateMaterials, type ClipRangeParams, type LlmConfig, type RenderSettings } from "../interface";
+  import { invoke } from "../invoker";
+  import { archiveFilesAvailable } from "../recording-storage";
+  import { announceTask, openTaskCenter, settleTask, wasCancelled } from "../stores/tasks";
 
   type LlmClipPhase = "summary" | "clipping" | "done" | "failed";
   interface LlmClipState {
@@ -10,7 +16,7 @@
   const llmClipStates = new SvelteMap<string, LlmClipState>();
 
   /*
-  一键 LLM 切片流程完全由前端驱动：页面卸载后剩余切片不会生成，后台
+  一键智能切片流程完全由前端驱动：页面卸载后剩余切片不会生成，后台
   Summary 任务即使完成也无人消费。菜单触发后组件可能先于流程结束卸载
   （onaction 会关闭菜单），所以计数与监听放在模块级，与实例生命周期解耦。
   */
@@ -19,7 +25,7 @@
   function handleBeforeUnload(event: BeforeUnloadEvent) {
     if (activeLlmClipRuns === 0) return;
     event.preventDefault();
-    event.returnValue = "LLM 切片流程尚未完成，离开页面后剩余切片将不会生成。";
+    event.returnValue = "智能切片尚未完成，离开页面后剩余切片将不会生成。";
   }
 
   function acquireUnloadGuard() {
@@ -33,40 +39,16 @@
       window.removeEventListener("beforeunload", handleBeforeUnload);
     }
   }
-</script>
 
-<script lang="ts">
-  import { AlertCircle, CheckCircle2, Loader2, Scissors } from "lucide-svelte";
-  import { archiveKey } from "../archives";
-  import type { RecordItem, RecordSummary, SummaryHighlight } from "../db";
-  import {
-    generateEventId,
-    generateMaterials,
-    type ClipRangeParams,
-    type LlmConfig,
-  } from "../interface";
-  import { invoke } from "../invoker";
-  import { announceTask, openTaskCenter, settleTask, wasCancelled } from "../stores/tasks";
-
-  interface Props {
-    archive: RecordItem;
-    menu?: boolean;
-    /** Recording files are unavailable (e.g. backend-only storage); matches sibling buttons. */
-    disabled?: boolean;
-    onaction?: () => void;
+  interface LlmClipOptions {
+    danmu: boolean;
+    renderSettings?: RenderSettings;
+    namePrefix: string;
   }
 
-  let { archive, menu = false, disabled = false, onaction }: Props = $props();
-
-  const key = $derived(archiveKey(archive));
-  const state = $derived(llmClipStates.get(key));
-  const running = $derived(state?.phase === "summary" || state?.phase === "clipping");
-
-  function llmClipTitle() {
-    if (running) return state?.message || "正在生成 LLM 切片…";
-    if (state?.phase === "done") return state.message;
-    if (state?.phase === "failed") return `生成失败：${state.message}`;
-    return "一键生成 LLM 切片（带弹幕）";
+  export function llmClipRunning(archive: RecordItem) {
+    const phase = llmClipStates.get(archiveKey(archive))?.phase;
+    return phase === "summary" || phase === "clipping";
   }
 
   function delay(ms: number): Promise<void> {
@@ -99,19 +81,15 @@
   }
 
   /**
-   * 一键生成 LLM 切片：
+   * 一键智能切片：
    * 1. 复用 Summary 链路，没有可用 Summary 时先自动生成；
    * 2. 读取 Summary 中的高光时间段；
-   * 3. 逐个调用 generateMaterials 生成带弹幕的独立素材。
+   * 3. 逐个调用 generateMaterials，按确认的输出设置生成独立素材。
    */
-  async function generateLlmClips() {
-    if (running) return;
-    // 菜单动作（日历视图的 onaction 会关闭菜单并清空响应式 archive）触发后
-    // 组件随之卸载，先截留目标和状态键的快照，整个异步流程只使用快照。
-    const target = archive;
-    const stateKey = key;
+  export async function generateLlmClips(target: RecordItem, options: LlmClipOptions) {
+    if (llmClipRunning(target) || !archiveFilesAvailable(target) || target.length <= 0) return;
+    const stateKey = archiveKey(target);
     const setState = (next: LlmClipState) => llmClipStates.set(stateKey, next);
-    onaction?.();
 
     acquireUnloadGuard();
     try {
@@ -223,9 +201,13 @@
           ranges: [
             { start: highlight.start_seconds, end: highlight.end_seconds },
           ],
-          danmu: true,
+          danmu: options.danmu,
+          render_settings: options.renderSettings,
+          output_stem: options.namePrefix
+            ? `${options.namePrefix}-${String(index + 1).padStart(2, "0")}`
+            : undefined,
           local_offset: localOffset,
-          fix_encoding: false,
+          fix_encoding: !!options.renderSettings,
         };
         announceTask({
           id: eventId,
@@ -264,7 +246,7 @@
           phase: "failed",
           message: `全部生成失败（共 ${highlights.length} 个）：${failures.join("；")}`,
         });
-        alert(`LLM 切片生成失败：\n${failures.join("\n")}`);
+        alert(`智能切片生成失败：\n${failures.join("\n")}`);
       } else {
         const extras: string[] = [];
         if (failures.length > 0) {
@@ -286,10 +268,31 @@
     } catch (error) {
       const message = String(error);
       setState({ phase: "failed", message });
-      alert(`LLM 切片生成失败：${message}`);
+      alert(`智能切片生成失败：${message}`);
     } finally {
       releaseUnloadGuard();
     }
+  }
+</script>
+
+<script lang="ts">
+  import { AlertCircle, CheckCircle2, Loader2, Scissors } from "lucide-svelte";
+
+  interface Props {
+    archive: RecordItem;
+    menu?: boolean;
+    disabled?: boolean;
+    onaction: () => void;
+  }
+  let { archive, menu = false, disabled = false, onaction }: Props = $props();
+  const state = $derived(llmClipStates.get(archiveKey(archive)));
+  const running = $derived(llmClipRunning(archive));
+
+  function llmClipTitle() {
+    if (running) return state?.message || "正在生成智能切片…";
+    if (state?.phase === "done") return state.message;
+    if (state?.phase === "failed") return `生成失败：${state.message}`;
+    return "一键智能切片";
   }
 </script>
 
@@ -300,9 +303,10 @@
   class:text-danger-fg={state?.phase === "failed"}
   class:text-accent-fg={state?.phase !== "done" && state?.phase !== "failed"}
   title={llmClipTitle()}
-  aria-label={`一键 LLM 切片：${archive.title}`}
+  aria-label={`一键智能切片：${archive.title}`}
   disabled={running || disabled || archive.length <= 0}
-  onclick={() => void generateLlmClips()}
+  aria-haspopup="dialog"
+  onclick={onaction}
 >
   {#if running}
     <Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />
@@ -313,5 +317,5 @@
   {:else}
     <Scissors class="h-4 w-4" />
   {/if}
-  {#if menu}<span>一键 LLM 切片</span>{/if}
+  {#if menu}<span>一键智能切片</span>{/if}
 </button>

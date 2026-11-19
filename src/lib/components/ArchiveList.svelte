@@ -21,6 +21,7 @@
   import ArchiveCalendarView from "./ArchiveCalendarView.svelte";
   import ArchiveCover from "./ArchiveCover.svelte";
   import ArchiveLlmClipButton from "./ArchiveLlmClipButton.svelte";
+  import ArchiveLlmClipModal from "./ArchiveLlmClipModal.svelte";
   import ArchiveSummaryModal from "./ArchiveSummaryModal.svelte";
   import BatchActionLayout from "./BatchActionLayout.svelte";
   import DeleteConfirmActions from "./DeleteConfirmActions.svelte";
@@ -61,6 +62,8 @@
   let archiveToDelete: RecordItem | null = $state(null);
   let showWholeClipModal = $state(false);
   let wholeClipArchive: RecordItem | null = $state(null);
+  let llmClipKey: string | null = $state(null);
+  const llmClipArchive = $derived(llmClipKey ? archives.find((item) => archiveKey(item) === llmClipKey) : null);
   let showSummaryModal = $state(false);
   let summaryArchive: RecordItem | null = $state(null);
   let calendarMenuOpen = $state(false);
@@ -96,7 +99,8 @@
   const recordingKeys = $derived(new Set(rooms.filter((room) => room.recording).map((room) =>
     archiveKey({ platform: room.room_info.platform, room_id: room.room_info.room_id, live_id: room.live_id }))));
 
-  $effect(() => { dialogOpen = showDeleteConfirm || showWholeClipModal || showSummaryModal || calendarMenuOpen || openMenuArchiveKey !== null; });
+  $effect(() => { dialogOpen = showDeleteConfirm || showWholeClipModal || !!llmClipArchive || showSummaryModal || calendarMenuOpen || openMenuArchiveKey !== null; });
+  $effect(() => { if (llmClipKey && !llmClipArchive) llmClipKey = null; });
   // Keep open dialogs on the latest per-archive availability after storage edits.
   $effect(() => {
     if (summaryArchive) summaryArchive = archives.find((item) => archiveKey(item) === archiveKey(summaryArchive!)) ?? null;
@@ -321,7 +325,7 @@
     <div class="grid gap-0.5" title={filesAvailable ? undefined : archiveStorageReason(archive)}>
       <button class="ui-menu-item w-full hover:bg-accent-soft text-accent-fg" disabled={!filesAvailable || archive.length <= 0} onclick={() => { const target = archive; onaction(); void playArchive(target); }}><Play class="h-4 w-4" /><span>预览录播</span></button>
       <button class="ui-menu-item w-full hover:bg-accent-soft text-accent-fg" disabled={!filesAvailable || archive.length <= 0} onclick={() => { const target = archive; onaction(); wholeClipArchive = target; showWholeClipModal = true; }}><FileVideo class="h-4 w-4" /><span>生成完整切片</span></button>
-      <ArchiveLlmClipButton {archive} {menu} {onaction} disabled={!filesAvailable} />
+      <ArchiveLlmClipButton {archive} {menu} onaction={() => { llmClipKey = key; onaction(); }} disabled={!filesAvailable} />
       <button class="ui-menu-item w-full hover:bg-accent-soft" class:text-success-fg={summaryStatus === "success"} class:text-danger-fg={summaryStatus === "failed"} class:text-accent-fg={summaryStatus !== "success" && summaryStatus !== "failed"} disabled={filesAvailable && archive.length <= 0} onclick={() => { const target = archive; onaction(); summaryArchive = target; showSummaryModal = true; }}>
         {#if summaryStatus === "processing"}<Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />{:else}<Sparkles class="h-4 w-4" />{/if}<span>{filesAvailable ? summaryButtonTitle(archive) : "查看已保存的总结"}</span>
       </button>
@@ -486,6 +490,9 @@
 {/if}
 
 <GenerateWholeClipModal bind:showModal={showWholeClipModal} archive={wholeClipArchive} roomId={wholeClipArchive?.room_id || ""} />
+{#if llmClipArchive}
+  <ArchiveLlmClipModal archive={llmClipArchive} onclose={() => (llmClipKey = null)} />
+{/if}
 <ArchiveSummaryModal bind:showModal={showSummaryModal} archive={summaryArchive} onUpdated={updateSummaryStatus} />
 
 <style>
