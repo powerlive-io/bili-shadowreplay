@@ -316,24 +316,40 @@
   {#if selectedUnavailable}<span class="text-[11px] text-danger-fg">选中项含存储不可用的录播，文件操作已禁用</span>{/if}
 {/snippet}
 
-{#snippet archiveActions(archive: RecordItem, menu: boolean, onaction: () => void)}
+{#snippet archiveActions(archive: RecordItem, placement: "row" | "row-menu" | "calendar-menu", onaction: () => void)}
   {@const summaryStatus = summaryStatuses[archiveKey(archive)]?.status}
   {@const filesAvailable = archiveFilesAvailable(archive)}
   {@const key = archiveKey(archive)}
+  {@const menu = placement !== "row"}
+  {@const summaryLabel = filesAvailable ? summaryButtonTitle(archive) : "查看已保存的总结"}
+  {#snippet summaryAction()}
+    <button class="{menu ? 'ui-menu-item w-full' : 'archive-action'} hover:bg-accent-soft"
+      class:text-success-fg={summaryStatus === "success"} class:text-danger-fg={summaryStatus === "failed"}
+      class:text-accent-fg={summaryStatus !== "success" && summaryStatus !== "failed"}
+      title={summaryLabel} aria-label={`${summaryLabel}：${archive.title}`} aria-haspopup="dialog"
+      disabled={filesAvailable && archive.length <= 0}
+      onclick={() => { const target = archive; onaction(); summaryArchive = target; showSummaryModal = true; }}>
+      {#if summaryStatus === "processing"}
+        <Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />
+      {:else}
+        <Sparkles class="h-4 w-4" fill={summaryStatus === "success" ? "currentColor" : "none"} />
+      {/if}
+      {#if menu}<span>{summaryLabel}</span>{/if}
+    </button>
+  {/snippet}
   <!-- Dismissing the event menu clears its reactive archive argument. Capture it first. -->
   {#if menu}
     <div class="grid gap-0.5" title={filesAvailable ? undefined : archiveStorageReason(archive)}>
       <button class="ui-menu-item w-full hover:bg-accent-soft text-accent-fg" disabled={!filesAvailable || archive.length <= 0} onclick={() => { const target = archive; onaction(); void playArchive(target); }}><Play class="h-4 w-4" /><span>预览录播</span></button>
       <button class="ui-menu-item w-full hover:bg-accent-soft text-accent-fg" disabled={!filesAvailable || archive.length <= 0} onclick={() => { const target = archive; onaction(); wholeClipArchive = target; showWholeClipModal = true; }}><FileVideo class="h-4 w-4" /><span>生成完整切片</span></button>
       <ArchiveLlmClipButton {archive} {menu} onaction={() => { llmClipKey = key; onaction(); }} disabled={!filesAvailable} />
-      <button class="ui-menu-item w-full hover:bg-accent-soft" class:text-success-fg={summaryStatus === "success"} class:text-danger-fg={summaryStatus === "failed"} class:text-accent-fg={summaryStatus !== "success" && summaryStatus !== "failed"} disabled={filesAvailable && archive.length <= 0} onclick={() => { const target = archive; onaction(); summaryArchive = target; showSummaryModal = true; }}>
-        {#if summaryStatus === "processing"}<Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />{:else}<Sparkles class="h-4 w-4" />{/if}<span>{filesAvailable ? summaryButtonTitle(archive) : "查看已保存的总结"}</span>
-      </button>
+      {#if placement === "calendar-menu"}{@render summaryAction()}{/if}
       <button class="ui-menu-item w-full text-danger-fg hover:bg-danger-soft" disabled={!filesAvailable} onclick={() => { const target = archive; onaction(); archiveToDelete = target; showDeleteConfirm = true; }}><Trash2 class="h-4 w-4" /><span>删除录播</span></button>
     </div>
   {:else}
     <div class="flex items-center justify-end gap-0.5" title={filesAvailable ? undefined : archiveStorageReason(archive)}>
       <button class="archive-action hover:bg-accent-soft text-accent-fg" title="预览录播" aria-label={`预览录播：${archive.title}`} disabled={!filesAvailable || archive.length <= 0} onclick={() => { const target = archive; onaction(); void playArchive(target); }}><Play class="h-4 w-4" /></button>
+      {@render summaryAction()}
       <button class="archive-action hover:bg-control-hover text-fg-secondary" class:bg-control-hover={openMenuArchiveKey === key}
         title="更多操作" aria-label={`更多操作：${archive.title}`} aria-haspopup="menu" aria-expanded={openMenuArchiveKey === key}
         data-action-menu-trigger onclick={(event) => toggleActionMenu(event, key)}><MoreVertical class="h-4 w-4" /></button>
@@ -342,7 +358,7 @@
 {/snippet}
 
 {#snippet calendarActions(archive: RecordItem, close: () => void)}
-  {@render archiveActions(archive, true, close)}
+  {@render archiveActions(archive, "calendar-menu", close)}
 {/snippet}
 
 <BatchActionLayout count={selectedArchives.size} itemLabel="录播" onclear={() => selectedArchives.clear()} {compact} scroll={$archiveViewMode === "list"}>
@@ -455,7 +471,7 @@
                   <td class="whitespace-nowrap px-3 py-2.5 tabular-nums">{formatSize(archive.size)}</td>
                   <td class="whitespace-nowrap px-3 py-2.5 tabular-nums text-fg-muted">{formatBitrate(archive.size, archive.length)}</td>
                   <td class="archive-actions-cell sticky right-0 px-3 py-2.5">
-                    {@render archiveActions(archive, false, () => {})}
+                    {@render archiveActions(archive, "row", () => {})}
                   </td>
                 </tr>
               {/each}
@@ -471,7 +487,7 @@
   <div bind:this={menuEl} class="archive-dropdown-menu custom-scrollbar-light" class:opens-up={menuPlacement.up} role="menu"
     aria-label={`录播操作：${menuArchive.title || "未命名录播"}`} tabindex="-1"
     style={`top:${menuPlacement.top}px;right:${menuPlacement.right}px`}>
-    {@render archiveActions(menuArchive, true, closeActionMenu)}
+    {@render archiveActions(menuArchive, "row-menu", closeActionMenu)}
   </div>
 {/if}
 
