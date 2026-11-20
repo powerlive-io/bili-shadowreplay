@@ -6,25 +6,14 @@ use std::{
 
 use tempfile::{tempdir_in, Builder, NamedTempFile, TempDir};
 
-#[cfg(test)]
-use ffmpeg_utils::decode_audio;
 pub(crate) use ffmpeg_utils::AudioTiming;
 use ffmpeg_utils::{
-    decode_audio_timeline, encode_flac_preview, encode_opus_sample_timeline, probe_media,
-    AudioDecodeOptions, AudioRange, AudioSink, AudioStreamMetadata,
+    decode_audio_timeline, encode_flac_preview, probe_media, AudioDecodeOptions, AudioRange,
+    AudioSink, AudioStreamMetadata,
 };
 
 const TRANSCRIPTION_SAMPLE_RATE: u32 = 16_000;
 const CHUNK_SAMPLES: usize = TRANSCRIPTION_SAMPLE_RATE as usize * 30;
-
-/// Encode the material's 16 kHz mono Opus sidecar.
-pub async fn extract_audio_sample(file: &Path) -> Result<PathBuf, String> {
-    log::info!("Extract audio sample task start: {}", file.display());
-    let output_path = file.with_extension("opus");
-    encode_opus_sample_timeline(file, &output_path).await?;
-    log::info!("Extract audio sample task end: {}", output_path.display());
-    Ok(output_path)
-}
 
 /// Extract 16 kHz mono WAV chunks into an RAII-managed temporary directory.
 ///
@@ -623,102 +612,5 @@ mod native_wav_tests {
         }
         assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
         assert_no_partial_wavs(directory.path());
-    }
-}
-
-#[cfg(test)]
-mod native_opus_tests {
-    use super::*;
-
-    #[derive(Default)]
-    struct Count(u64);
-
-    impl AudioSink for Count {
-        fn write(&mut self, samples: &[i16]) -> Result<(), String> {
-            self.0 += samples.len() as u64;
-            Ok(())
-        }
-    }
-
-    fn assert_no_partial_opus(directory: &Path) {
-        assert!(std::fs::read_dir(directory).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".opus-")));
-    }
-
-    #[tokio::test]
-    async fn material_audio_sample_is_a_complete_native_mono_opus_sidecar() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("素材 样本.wav");
-        let mut writer = hound::WavWriter::create(
-            &source,
-            hound::WavSpec {
-                channels: 2,
-                sample_rate: 48_000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )
-        .unwrap();
-        for index in 0..48_000 {
-            let sample = (12_000.0 * (index as f64 * 0.031).sin()) as i16;
-            writer.write_sample(sample).unwrap();
-            writer.write_sample(sample / 2).unwrap();
-        }
-        writer.finalize().unwrap();
-        let expected = source.with_extension("opus");
-        std::fs::write(&expected, b"old sidecar").unwrap();
-        let output = extract_audio_sample(&source).await.unwrap();
-        assert_eq!(output, expected);
-        let data = std::fs::read(&output).unwrap();
-        assert_eq!(&data[..4], b"OggS");
-        let head = data
-            .windows(8)
-            .position(|part| part == b"OpusHead")
-            .unwrap();
-        assert_eq!(data[head + 9], 1);
-        assert_eq!(
-            u32::from_le_bytes(data[head + 12..head + 16].try_into().unwrap()),
-            16_000
-        );
-        let decoded = decode_audio(
-            &output,
-            AudioDecodeOptions {
-                sample_rate: 48_000,
-            },
-            Count::default(),
-        )
-        .await
-        .unwrap();
-        assert!(decoded.has_audio);
-        assert_eq!(decoded.samples, 48_000);
-        assert_eq!(decoded.sink.0, decoded.samples);
-        let original = std::fs::read(&output).unwrap();
-        assert!(extract_audio_sample(&output).await.is_err());
-        assert_eq!(std::fs::read(&output).unwrap(), original);
-        assert_no_partial_opus(directory.path());
-    }
-
-    #[tokio::test]
-    async fn material_audio_sample_failures_preserve_previous_sidecars() {
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("missing.wav");
-        let invalid = directory.path().join("invalid.wav");
-        std::fs::write(&invalid, b"invalid media").unwrap();
-        let video = directory.path().join("video.mp4");
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/video/test.mp4"),
-            &video,
-        )
-        .unwrap();
-        for source in [&missing, &invalid, &video] {
-            let output = source.with_extension("opus");
-            std::fs::write(&output, b"previous sidecar").unwrap();
-            assert!(extract_audio_sample(source).await.is_err());
-            assert_eq!(std::fs::read(&output).unwrap(), b"previous sidecar");
-            assert_no_partial_opus(directory.path());
-        }
     }
 }

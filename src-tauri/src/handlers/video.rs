@@ -603,7 +603,6 @@ pub(crate) async fn create_material(
             cover_name.clear();
         }
     }
-    let _ = crate::ffmpeg::extract_audio_sample(&file).await?;
     // get filename from path
     let filename = Path::new(&file)
         .file_name()
@@ -1279,15 +1278,6 @@ async fn generate_video_subtitle_inner(
     }
 }
 
-#[cfg_attr(feature = "gui", tauri::command)]
-pub async fn update_video_subtitle(
-    state: state_type!(),
-    id: i64,
-    subtitle: String,
-) -> Result<(), String> {
-    update_video_subtitle_inner(&state, id, subtitle).await
-}
-
 async fn update_video_subtitle_inner(
     state: &State,
     id: i64,
@@ -1724,200 +1714,6 @@ pub async fn import_external_video(
     Ok(result)
 }
 
-// 通用视频切片函数（支持所有类型的视频）
-#[cfg_attr(feature = "gui", tauri::command)]
-pub async fn clip_video(
-    state: state_type!(),
-    event_id: String,
-    parent_video_id: i64,
-    start_time: f64,
-    end_time: f64,
-    clip_title: String,
-) -> Result<VideoRow, String> {
-    // 获取父视频信息
-    let parent_video = state.db.get_video(parent_video_id).await?;
-
-    let reporter = ProgressReporter::new(state.db.clone(), &state.events, &event_id).await?;
-
-    // 创建任务记录
-    let task = TaskRow {
-        id: event_id.clone(),
-        task_type: "clip_video".to_string(),
-        status: "pending".to_string(),
-        message: String::new(),
-        metadata: json!({
-            "parent_video_id": parent_video_id,
-            "start_time": start_time,
-            "end_time": end_time,
-            "clip_title": clip_title,
-        })
-        .to_string(),
-        created_at: Utc::now().to_rfc3339(),
-    };
-    state.db.add_task(&task).await?;
-
-    #[cfg(feature = "gui")]
-    let state_clone = (*state).clone();
-    #[cfg(feature = "headless")]
-    let state_clone = state.clone();
-
-    let task_id = event_id.clone();
-    run_queued(
-        &state,
-        &task_id,
-        async move {
-            match clip_video_inner(
-                &state_clone,
-                &reporter,
-                parent_video,
-                start_time,
-                end_time,
-                clip_title,
-            )
-            .await
-            {
-                Ok(video) => {
-                    reporter.finish(true, "切片完成").await;
-                    state_clone
-                        .db
-                        .update_task(&event_id, "success", "切片完成", None)
-                        .await?;
-                    Ok(video)
-                }
-                Err(e) => {
-                    reporter.finish(false, &format!("切片失败: {e}")).await;
-                    state_clone
-                        .db
-                        .update_task(&event_id, "failed", &format!("切片失败: {e}"), None)
-                        .await?;
-                    Err(e)
-                }
-            }
-        },
-        "切片任务已取消",
-        "切片任务失败",
-    )
-    .await
-}
-
-async fn clip_video_inner(
-    state: &State,
-    reporter: &ProgressReporter,
-    parent_video: VideoRow,
-    start_time: f64,
-    end_time: f64,
-    clip_title: String,
-) -> Result<VideoRow, String> {
-    // Copy the path out so no config guard is held across ffmpeg.
-    let output = state.config.read().await.output.clone();
-
-    // 构建输入文件路径
-    let input_path = Path::new(&output).join(&parent_video.file);
-
-    if !input_path.exists() {
-        return Err("原视频文件不存在".to_string());
-    }
-
-    // 统一的输出目录：clips
-    let output_dir = Path::new(&output).join("clips");
-    if !output_dir.exists() {
-        std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
-    }
-
-    let timestamp = Local::now().format("%Y%m%d%H%M").to_string();
-    let extension = input_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("mp4");
-
-    // 获取原文件名（不含扩展名）
-    let original_filename = input_path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("video");
-
-    // 生成新的文件名格式：[clip]原文件名[时间戳].扩展名
-    let output_filename = format!(
-        "{}{}[{}].{}",
-        crate::constants::PREFIX_CLIP,
-        original_filename,
-        timestamp,
-        extension
-    );
-    let output_full_path = output_dir.join(&output_filename);
-
-    // 执行切片
-    reporter.update("开始切片处理").await;
-    ffmpeg::clip_from_video_file(
-        Some(reporter),
-        &input_path,
-        &output_full_path,
-        start_time,
-        end_time - start_time,
-    )
-    .await?;
-
-    // 生成缩略图文件名，确保路径安全
-    let thumbnail_full_path = output_full_path.with_extension("jpg");
-
-    // 从切片中随机截取缩略图
-    let clip_duration = match ffmpeg_utils::extract_video_metadata(&output_full_path).await {
-        Ok(metadata) if metadata.duration.is_finite() && metadata.duration > 0.0 => {
-            metadata.duration
-        }
-        _ => end_time - start_time,
-    };
-    let clip_thumbnail_timestamp = ffmpeg::get_random_thumbnail_timestamp(clip_duration);
-    let clip_cover_path =
-        match ffmpeg::generate_thumbnail(&output_full_path, clip_thumbnail_timestamp).await {
-            Ok(_) => thumbnail_full_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    format!("Invalid thumbnail path: {}", thumbnail_full_path.display())
-                })?
-                .to_string(),
-            Err(e) => {
-                log::warn!("生成切片缩略图失败: {e}");
-                String::new() // 使用空字符串，前端会显示默认图标
-            }
-        };
-
-    let file_metadata = output_full_path.metadata().map_err(|e| e.to_string())?;
-
-    let clip_video = VideoRow {
-        id: 0,
-        room_id: parent_video.room_id,
-        platform: "clip".to_string(),
-        title: clip_title,
-        file: output_filename,
-        note: String::new(),
-        length: clip_duration as i64,
-        size: i64::try_from(file_metadata.len()).map_err(|e| e.to_string())?,
-        status: 1,
-        cover: clip_cover_path,
-        desc: String::new(),
-        tags: String::new(),
-        bvid: String::new(),
-        area: parent_video.area,
-        created_at: Local::now().to_rfc3339(),
-        live_id: String::new(),
-        source: String::new(),
-        duration: clip_duration,
-        danmu_embedded: parent_video.danmu_embedded,
-    };
-
-    let result = state.db.add_video(&clip_video).await?;
-
-    // 发送通知消息
-    state
-        .db
-        .new_message("视频切片完成", &format!("生成切片：{}", result.title))
-        .await?;
-
-    Ok(result)
-}
-
 // 获取文件大小
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_file_size(file_path: String) -> Result<u64, String> {
@@ -2084,17 +1880,6 @@ pub async fn get_import_progress(
     }
 
     Ok(None)
-}
-
-#[cfg_attr(feature = "gui", tauri::command)]
-pub async fn generate_audio_sample(state: state_type!(), video_id: i64) -> Result<(), String> {
-    let video = state.db.get_video(video_id).await?;
-    let video_path = Path::new(&state.config.read().await.output).join(&video.file);
-    let opus_path = video_path.with_extension("opus");
-    if !opus_path.exists() {
-        let _ = crate::ffmpeg::extract_audio_sample(&video_path).await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2532,6 +2317,15 @@ mod queued_subtitle_tests {
         }
     }
 
+    fn clip_params() -> ClipRangeParams {
+        serde_json::from_value(json!({
+            "title": "Clip", "note": "", "cover": "", "platform": "bilibili",
+            "room_id": "room", "live_id": "live", "ranges": [],
+            "danmu": false, "local_offset": 0, "fix_encoding": false,
+        }))
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn clip_request_distinguishes_cancelled_tasks_from_unexpected_worker_drops() {
         use tokio::time::{timeout, Duration};
@@ -2541,13 +2335,7 @@ mod queued_subtitle_tests {
             let state = fixture(dir.path(), 1, false).await;
             let request_state = state.clone();
             let request = tokio::spawn(async move {
-                let params = serde_json::from_value(json!({
-                    "title": "Clip", "note": "", "cover": "", "platform": "bilibili",
-                    "room_id": "room", "live_id": "live", "ranges": [],
-                    "danmu": false, "local_offset": 0, "fix_encoding": false,
-                }))
-                .unwrap();
-                clip_range(request_state, "clip-request".into(), params).await
+                clip_range(request_state, "clip-request".into(), clip_params()).await
             });
             timeout(Duration::from_secs(3), async {
                 while state.task_manager.queue_size().await == 0 {
@@ -2586,60 +2374,23 @@ mod queued_subtitle_tests {
     }
 
     #[tokio::test]
-    async fn queued_video_clip_can_be_cancelled_from_the_task_list() {
-        use tokio::time::{timeout, Duration};
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = fixture(dir.path(), 1, false).await;
-        let request_state = state.clone();
-        let request = tokio::spawn(async move {
-            clip_video(
-                request_state,
-                "video-clip".into(),
-                1,
-                0.0,
-                1.0,
-                "Clip".into(),
-            )
-            .await
-        });
-        timeout(Duration::from_secs(3), async {
-            while state.task_manager.queue_size().await == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("video clip must enqueue so the task list can cancel it");
-
-        cancel(state.clone(), "video-clip".into()).await.unwrap();
-        let error = timeout(Duration::from_secs(1), request)
-            .await
-            .expect("video clip request must unblock when cancelled")
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(error, "切片任务已取消");
-    }
-
-    #[tokio::test]
-    async fn video_clip_rejected_by_a_full_queue_is_marked_failed() {
+    async fn clip_range_rejected_by_a_full_queue_is_marked_failed() {
         use tokio::time::{timeout, Duration};
 
         let dir = tempfile::tempdir().unwrap();
         let state = fixture(dir.path(), 1, false).await;
         let first_state = state.clone();
-        let first = tokio::spawn(async move {
-            clip_video(first_state, "first".into(), 1, 0.0, 1.0, "Clip".into()).await
-        });
+        let first = tokio::spawn(clip_range(first_state, "first".into(), clip_params()));
         timeout(Duration::from_secs(3), async {
             while state.task_manager.queue_size().await == 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("first video clip must occupy the queue");
+        .expect("first clip request must occupy the queue");
 
         assert_eq!(
-            clip_video(state.clone(), "overflow".into(), 1, 0.0, 1.0, "Clip".into())
+            clip_range(state.clone(), "overflow".into(), clip_params())
                 .await
                 .unwrap_err(),
             "Queue is full"
@@ -2652,7 +2403,7 @@ mod queued_subtitle_tests {
         cancel(state.clone(), "first".into()).await.unwrap();
         timeout(Duration::from_secs(1), first)
             .await
-            .expect("cancelled video clip must unblock")
+            .expect("cancelled clip request must unblock")
             .unwrap()
             .unwrap_err();
     }

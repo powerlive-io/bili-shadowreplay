@@ -793,9 +793,8 @@ seg-3.mp4
             assert!(covered.source.start <= asked.start, "{covered:?} {asked:?}");
             assert!(covered.source.end >= asked.end, "{covered:?} {asked:?}");
         }
-        super::super::audio::extract_audio_sample(&output)
-            .await
-            .unwrap();
+        let waveform = crate::material::peaks(&output).await.unwrap();
+        assert!(!waveform.peaks.is_empty());
     }
 
     #[tokio::test]
@@ -892,7 +891,9 @@ seg-3.mp4
                     "EOF must not be inferred from requested end"
                 );
             }
-            let opus = super::super::audio::extract_audio_sample(&output)
+            // Compare sample counts across codecs without relying on a material sidecar.
+            let opus = dir.path().join("clock-reference.opus");
+            ffmpeg_utils::encode_opus_sample_timeline(&output, &opus)
                 .await
                 .unwrap();
             let wav = super::super::audio::extract_full_audio(&output)
@@ -917,7 +918,7 @@ seg-3.mp4
             .unwrap();
             assert_eq!(
                 opus.samples, wave_samples,
-                "subtitle PCM and Opus sidecar must use the same clock"
+                "subtitle PCM and Opus reference must use the same clock"
             );
         }
     }

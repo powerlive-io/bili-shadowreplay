@@ -26,10 +26,11 @@ title: "素材、切片工程与投稿"
 | 文件 | 说明 |
 | --- | --- |
 | `<stem>.jpg` | 缩略图 |
-| `<stem>.opus` | 波形用音频样本 |
 | `<stem>.srt` | AI 识别字幕缓存（素材时间） |
 | `<stem>.danmu.json` | 截取的弹幕，`ts` 为相对素材起点的毫秒 |
-| `<stem>.peaks.json` | 时间轴波形峰值缓存 |
+| `<stem>.peaks.json` | 时间轴波形峰值缓存，首次读取时直接从素材计算 |
+
+新素材不再生成波形用的 `<stem>.opus`。迁移或删除旧素材时，仍会处理已有的同名 `.opus` 文件。
 
 从录播生成素材时，默认每个选区生成一个素材（直接复制视频流，不重新编码）；`merge` 时按选区顺序拼接成一个素材（重新编码），弹幕按拼接后的时间轴截取，内嵌弹幕在拼接后压制。两种方式都可选同时创建包含这些素材的切片工程。
 
@@ -114,7 +115,7 @@ title: "素材、切片工程与投稿"
 | `get_material_usage` / `get_material_peaks` / `get_material_danmu` | 素材被哪些工程使用 / 波形峰值 / 截取的弹幕 |
 | `get_projects` / `get_project` / `create_project` / `delete_project` | 工程增删查 |
 | `update_project_info` / `update_project_timeline` | 工程修改：标题与备注可分别保存；保存时间轴时附带编辑器上次见到的已保存时间轴，后端据此合并期间自己的修改（弹幕设置、删除素材移除的片段、识别回填的字幕），编辑窗口收到变更时按同样规则合并 |
-| `update_project_danmu` | 切换工程的弹幕设置（编辑窗口与投稿页共用） |
+| `update_project_output_settings` | 更新工程导出和投稿共用的输出设置；可只传 `danmu` 或 `renderSettings`，未传的字段保留原值 |
 | `export_project` | 把工程导出到指定文件（Web 端导出到缓存供下载），返回导出任务 |
 | `get_uploads` / `get_upload` / `create_upload` / `delete_upload` | 投稿记录增删查，列表附带来源名称、是否需要生成视频与封面 |
 | `update_upload` / `update_upload_cover` | 保存草稿的账号与投稿信息 / 封面 |
