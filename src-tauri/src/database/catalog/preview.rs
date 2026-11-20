@@ -36,6 +36,7 @@ impl StartupPreview {
                 storage_backend_id: alias.into(),
                 storage_available: false,
                 storage_unavailable_reason: Some("正在加载存储目录，仅可查看录播信息".into()),
+                storage_initializing: true,
             },
         );
     }

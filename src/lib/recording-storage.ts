@@ -28,6 +28,11 @@ export function archiveFilesAvailable(archive: RecordItem | null | undefined): b
   return !!archive && archive.storage_available !== false;
 }
 
+export function archiveStorageLabel(archive: RecordItem): string {
+  if (archiveFilesAvailable(archive)) return "";
+  return archive.storage_initializing ? "加载中 · 仅可查看" : "存储不可用 · 仅记录";
+}
+
 export function archiveStorageReason(archive: RecordItem): string {
   return archive.storage_unavailable_reason ||
     `录播所属存储 ${archive.storage_backend_id || "（未知）"} 未配置或不受支持，无法访问文件。录播记录仍保留。`;

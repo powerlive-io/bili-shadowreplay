@@ -310,10 +310,10 @@
   onpointerdown={handlePointerDown} onscrollcapture={handleMenuScroll} onresize={closeActionMenu} />
 
 {#snippet deleteSelectedButton()}
-  <button class="ui-btn ui-btn-danger" disabled={selectedUnavailable} title={selectedUnavailable ? "选中项包含存储不可用的录播，无法删除文件；请先取消选择这些记录" : "删除选中的录播及文件"} onclick={() => { archiveToDelete = null; showDeleteConfirm = true; }}>
+  <button class="ui-btn ui-btn-danger" disabled={selectedUnavailable} title={selectedUnavailable ? "请先取消选择仅可查看的录播" : "删除选中的录播及文件"} onclick={() => { archiveToDelete = null; showDeleteConfirm = true; }}>
     <Trash2 class="h-3.5 w-3.5" />删除选中
   </button>
-  {#if selectedUnavailable}<span class="text-[11px] text-danger-fg">选中项含存储不可用的录播，文件操作已禁用</span>{/if}
+  {#if selectedUnavailable}<span class="text-[11px] text-fg-muted">选中项含仅可查看的录播，无法删除文件</span>{/if}
 {/snippet}
 
 {#snippet archiveActions(archive: RecordItem, placement: "row" | "row-menu" | "calendar-menu", onaction: () => void)}

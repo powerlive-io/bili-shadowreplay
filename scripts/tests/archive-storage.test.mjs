@@ -58,7 +58,7 @@ test("availability is pinned to each archive and only explicit false blocks lega
   assert.equal(archiveStorageReason({ storage_unavailable_reason: "Unsupported S3 backend" }), "Unsupported S3 backend");
 });
 
-test("storage badges show only the identifier unless storage is unavailable", async () => {
+test("storage badges distinguish startup previews, unavailable storage and ready rows", async () => {
   const source = await read("lib/components/ArchiveStorageBadge.svelte");
   const module = new vm.SourceTextModule(compile(source, { generate: "server" }).js.code);
   await module.link(async name => {
@@ -69,7 +69,11 @@ test("storage badges show only the identifier unless storage is unavailable", as
   });
   await module.evaluate();
   const show = (archive, props = {}) => render(module.namespace.default, { props: { archive, ...props } }).body;
-  assert.match(show(row("old", false)), /存储不可用 · 仅记录/);
+  const preview = { ...row("scanning", false), storage_initializing: true, storage_unavailable_reason: "正在加载存储目录，仅可查看录播信息" };
+  assert.equal(archiveFilesAvailable(preview), false);
+  assert.match(show(preview), /ui-badge-accent[^>]*title="正在加载存储目录，仅可查看录播信息"[^>]*>加载中 · 仅可查看/);
+  assert.doesNotMatch(show(preview), /ui-badge-danger|存储不可用/);
+  assert.match(show(row("old", false)), /ui-badge-danger[^>]*>存储不可用 · 仅记录/);
   assert.match(show(row("old", false)), /disk-old/);
   assert.match(show(row("new")), /存储：disk-new/);
   assert.doesNotMatch(show(row("new")), /已配置|未检测文件/);
