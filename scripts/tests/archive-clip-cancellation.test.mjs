@@ -11,7 +11,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function fixture({ variant = "primary" } = {}) {
+async function fixture({ variant = "primary", withCallback = true } = {}) {
   const alerts = [], failures = [], generated = [], requests = [];
   const announced = [], settled = [], opened = [];
   const cancelled = new Set();
@@ -24,7 +24,7 @@ async function fixture({ variant = "primary" } = {}) {
       archive: { title: "Archive", room_id: "1", live_id: "2", platform: "bilibili" },
       ranges: [{ start: 0, end: 10 }],
       variant,
-      onGenerated: (video) => generated.push(video),
+      ...(withCallback ? { onGenerated: (video) => generated.push(video) } : {}),
       onFailed: (message) => failures.push(message),
     }),
     localStorage: { getItem: () => null },
@@ -107,6 +107,16 @@ test("a started clip is announced, highlighted, and settled with its result", as
   request.resolve({ id: 1 });
   await completion;
   assert.deepEqual(f.generated, [{ id: 1 }]);
+  assert.deepEqual(f.settled, [request.eventId]);
+  assert.deepEqual(f.alerts, []);
+});
+
+test("a summary highlight generates its material without a completion callback", async () => {
+  const f = await fixture({ variant: "compact", withCallback: false });
+  const { completion, request } = await startClip(f);
+  assert.deepEqual(f.settled, []);
+  request.resolve({ id: 1 });
+  await completion;
   assert.deepEqual(f.settled, [request.eventId]);
   assert.deepEqual(f.alerts, []);
 });
