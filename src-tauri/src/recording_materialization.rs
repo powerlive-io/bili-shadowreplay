@@ -47,11 +47,10 @@ fn dependency_keys(playlist: &MediaPlaylist, ranges: &[Range]) -> io::Result<Vec
             active_key = key.uri.clone();
         }
         let end = duration + segment.duration as f64;
-        // Match ffmpeg::playlist's segment selection, including boundary segments.
         if ranges.is_empty()
             || ranges
                 .iter()
-                .any(|range| range.is_in(duration) || range.is_in(end))
+                .any(|range| range.intersects_segment(duration, end))
         {
             keys.insert(segment.uri.clone());
             keys.extend(active_map.iter().cloned());
@@ -208,6 +207,17 @@ mod tests {
     #[test]
     fn range_dependencies_include_inherited_init_without_changing_timeline() {
         let (_, playlist) = m3u8_rs::parse_media_playlist(PLAYLIST.as_bytes()).unwrap();
+        assert_eq!(
+            dependency_keys(
+                &playlist,
+                &[Range {
+                    start: 2.5,
+                    end: 3.0
+                }]
+            )
+            .unwrap(),
+            vec!["init.mp4", "second.m4s"]
+        );
         assert_eq!(
             dependency_keys(
                 &playlist,

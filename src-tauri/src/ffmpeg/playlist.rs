@@ -177,7 +177,7 @@ async fn clip_from_playlist_with_timing(
     if let Some(range) = &range {
         let mut duration = 0.0;
         for s in playlist.segments.clone() {
-            if range.is_in(duration) || range.is_in(duration + s.duration as f64) {
+            if range.intersects_segment(duration, duration + s.duration as f64) {
                 segments.push(s.clone());
                 if start_offset.is_none() {
                     start_offset = Some(range.start - duration);
@@ -705,7 +705,7 @@ seg-3.mp4
         let dir = tempfile::tempdir().unwrap();
         let playlist = create_test_playlist(dir.path(), 30.0).await;
         let output = dir.path().join("joined.mp4");
-        // Neither range starts on a keyframe.
+        // Neither range starts on a keyframe. The second is wholly inside one HLS segment.
         let ranges = [
             Range {
                 start: 7.3,
@@ -713,7 +713,7 @@ seg-3.mp4
             },
             Range {
                 start: 21.2,
-                end: 24.2,
+                end: 21.8,
             },
         ];
         let covered = clip_multiple_with_settings(
