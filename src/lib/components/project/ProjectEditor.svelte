@@ -51,7 +51,6 @@
     type AudioFile,
     type AudioItem,
     type ExportStarted,
-    type MaterialPeaks,
     type OverlayImage,
     type OverlayItem,
     type ProjectItem,
@@ -100,7 +99,6 @@
     splitAudio,
     splitClip,
     splitOverlay,
-    timelineAudio,
     timelineDuration,
     updateSubtitleText,
     visibleSubtitles,
@@ -111,6 +109,7 @@
     type OverlayContent,
     type OverlayTarget,
   } from "../../project-timeline";
+  import { createProjectMaterialData } from "../../project-material-data";
   import { ProjectPlayer, type PlayerSegment } from "../../project-player";
   import { PreviewAudio, SAMPLE_RATE, type Voice } from "../../preview-audio";
   import { shownRows } from "../../virtual-list";
@@ -180,11 +179,9 @@
   let redoStack: ProjectTimeline[] = $state.raw([]);
   let materials: Map<number, MaterialInfo> = $state.raw(new Map());
   let binMaterials: BinMaterial[] = $state.raw([]);
-  let peaks: Map<number, MaterialPeaks> = $state.raw(new Map());
+  const { peaks, audioPeaks, danmuTimes, load: loadMaterialData } = createProjectMaterialData(invoke);
   let audioFiles: Map<number, AudioEntry> = $state.raw(new Map());
   let audioEntries: AudioEntry[] = $state.raw([]);
-  let audioPeaks: Map<number, MaterialPeaks> = $state.raw(new Map());
-  let danmuCounts: Map<number, number[]> = $state.raw(new Map());
   /** The frame rate export renders the project at, which edits land on; 0 until known. */
   let frameRate = $state(0);
 
@@ -392,7 +389,7 @@
   });
   let visibleDanmuCount = $derived(
     placed.reduce((total, item) => {
-      const times = danmuCounts.get(item.clip.material_id) ?? [];
+      const times = danmuTimes.get(item.clip.material_id) ?? [];
       return total + times.filter((ts) => ts >= item.clip.start * 1000 && ts < item.clip.end * 1000).length;
     }, 0),
   );
@@ -533,44 +530,9 @@
       title = view.title;
       await set_title(view.title || "切片");
       await loadMaterials();
-      void loadMaterialData();
+      void loadMaterialData(timeline);
     } catch (error) {
       loadError = String(error);
-    }
-  }
-
-  /** Waveforms and danmaku times of the materials on the timeline, and waveforms of its sounds. */
-  async function loadMaterialData() {
-    const sounds = timeline.audio_tracks.flatMap((track) => track.items);
-    const heard = sounds.flatMap((item) => (item.kind === "material" ? [item.material_id] : []));
-    for (const id of new Set(heard)) {
-      if (!peaks.has(id)) {
-        invoke<MaterialPeaks>("get_material_peaks", { id })
-          .then((data) => (peaks = new Map(peaks).set(id, data)))
-          .catch((error) => console.warn("Failed to load waveform:", error));
-      }
-    }
-    for (const id of timelineAudio(timeline)) {
-      if (!audioPeaks.has(id)) {
-        invoke<MaterialPeaks>("get_audio_peaks", { id })
-          .then((data) => (audioPeaks = new Map(audioPeaks).set(id, data)))
-          .catch((error) => console.warn("Failed to load waveform:", error));
-      }
-    }
-    for (const id of new Set(timeline.clips.map((clip) => clip.material_id))) {
-      if (!peaks.has(id)) {
-        invoke<MaterialPeaks>("get_material_peaks", { id })
-          .then((data) => (peaks = new Map(peaks).set(id, data)))
-          .catch((error) => console.warn("Failed to load waveform:", error));
-      }
-      if (!danmuCounts.has(id)) {
-        invoke<{ ts: number; type: string }[]>("get_material_danmu", { id })
-          .then((entries) => {
-            const times = entries.filter((entry) => entry.type === "danmu").map((entry) => entry.ts);
-            danmuCounts = new Map(danmuCounts).set(id, times);
-          })
-          .catch((error) => console.warn("Failed to load danmaku:", error));
-      }
     }
   }
 
@@ -770,7 +732,7 @@
     redoStack = [];
     timeline = next;
     scheduleSave();
-    void loadMaterialData();
+    void loadMaterialData(timeline);
     // Asked again after it failed to load.
     if (!frameRate) void loadFrameRate(frameRateSource);
   }
