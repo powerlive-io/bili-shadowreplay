@@ -174,6 +174,10 @@
   let project: ProjectItem | null = $state(null);
   let loadError = $state("");
   let title = $state("");
+  // The title this draft was edited from, not necessarily the latest project view.
+  let titleBase = "";
+  let titleSaving: Promise<void> | null = null;
+  let titleWrites = 0;
   let timeline: ProjectTimeline = $state.raw(parseTimeline(""));
   let undoStack: ProjectTimeline[] = $state.raw([]);
   let redoStack: ProjectTimeline[] = $state.raw([]);
@@ -527,7 +531,7 @@
       project = view;
       // Overlays or sounds a material deleted meanwhile left overlapping were lifted apart.
       if (loaded.tracks !== parsed.tracks || loaded.audio_tracks !== parsed.audio_tracks) scheduleSave();
-      title = view.title;
+      title = titleBase = view.title;
       await set_title(view.title || "切片");
       await loadMaterials();
       void loadMaterialData(timeline);
@@ -537,12 +541,22 @@
   }
 
   // Keep the project current, merging the backend's edits into local ones.
-  const projectRefresh = createStateRefresh(async () => {
+  async function refreshProject() {
     if (!project) return;
     // A save in flight brings back its own result; read what it left.
     while (saving) await saving;
-    if (applyProjectView(await invoke<ProjectItem>("get_project", { id: projectId }))) scheduleSave();
-  });
+    const writes = titleWrites;
+    const view = await invoke<ProjectItem>("get_project", { id: projectId });
+    if (applyProjectView(view)) scheduleSave();
+    // Don't apply a snapshot taken before our own rename committed.
+    if (titleSaving || writes !== titleWrites) {
+      if (titleSaving) await titleSaving.catch(() => {});
+      projectRefresh.schedule();
+    } else {
+      await receiveTitle(view.title);
+    }
+  }
+  const projectRefresh = createStateRefresh(refreshProject);
   // Deleted materials leave the library, and their clips the timeline.
   const materialRefresh = createStateRefresh(loadMaterials);
 
@@ -855,14 +869,41 @@
     }
   }
 
-  async function saveInfo() {
-    if (!project || title === project.title) return;
-    // Only the title: the note is edited from the projects list.
-    const saved = title;
-    await invoke("update_project_info", { id: projectId, title: saved });
-    // So a later change back is saved too, before the refresh reports it.
-    if (project) project = { ...project, title: saved };
+  async function receiveTitle(remote: string) {
+    if (remote === titleBase || (title !== titleBase && title !== remote)) return;
+    title = titleBase = remote;
+    await set_title(remote || "切片");
+  }
+
+  async function writeTitle(saved: string, expected: string) {
+    for (;;) {
+      const current = await invoke<string | null>("update_project_info", {
+        id: projectId, title: saved, expectedTitle: expected,
+      });
+      if (current == null || current === saved) break;
+      if (title !== saved) return; // A newer draft must make its own decision.
+      if (!await confirm(`标题已被改为「${current}」。要用本地标题「${saved}」替换它吗？`)) {
+        throw new Error("未覆盖最新标题，本地草稿已保留。");
+      }
+      if (title !== saved) return;
+      expected = current; // Only overwrite the version the user just saw.
+    }
+    titleBase = saved;
     await set_title(saved || "切片");
+  }
+
+  async function saveInfo() {
+    if (!project) return;
+    // Blur, close and export can coincide. Drain newer edits after the shared write.
+    while (titleSaving || title !== titleBase) {
+      if (!titleSaving) {
+        titleSaving = writeTitle(title, titleBase).finally(() => {
+          titleWrites++;
+          titleSaving = null;
+        });
+      }
+      await titleSaving;
+    }
   }
 
   // ---- Overlays ------------------------------------------------------------

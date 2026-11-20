@@ -1327,14 +1327,24 @@ struct UpdateProjectInfoRequest {
     title: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    expected_title: Option<String>,
 }
 
 async fn handler_update_project_info(
     state: axum::extract::State<State>,
     Json(param): Json<UpdateProjectInfoRequest>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    update_project_info(state.0, param.id, param.title, param.note).await?;
-    Ok(Json(ApiResponse::success(())))
+) -> Result<Json<ApiResponse<Option<String>>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        update_project_info(
+            state.0,
+            param.id,
+            param.title,
+            param.note,
+            param.expected_title,
+        )
+        .await?,
+    )))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

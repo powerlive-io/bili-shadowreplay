@@ -112,24 +112,31 @@ impl Database {
     // editor saving the timeline while the title is saved.
 
     /// Save the title, the note or both; `None` keeps a column as it is.
+    /// A guarded rename returns the current title if the editor's base is stale.
     pub async fn update_project_info(
         &self,
         id: i64,
         title: Option<&str>,
         note: Option<&str>,
+        expected_title: Option<&str>,
         updated_at: &str,
-    ) -> Result<(), DatabaseError> {
-        sqlx::query(
-            "UPDATE projects SET title = COALESCE($1, title), note = COALESCE($2, note), updated_at = $3 WHERE id = $4",
+    ) -> Result<Option<String>, DatabaseError> {
+        let updated = sqlx::query(
+            "UPDATE projects SET title = COALESCE($1, title), note = COALESCE($2, note), updated_at = $3
+             WHERE id = $4 AND ($5 IS NULL OR title = $5)",
         )
-            .bind(title)
-            .bind(note)
-            .bind(updated_at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        .bind(title)
+        .bind(note)
+        .bind(updated_at)
+        .bind(id)
+        .bind(expected_title)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Ok(Some(self.get_project(id).await?.title));
+        }
         self.notify_change(DataChange::Projects);
-        Ok(())
+        Ok(None)
     }
 
     /// Replace the timeline only if it is still `expected`. False when it
@@ -237,10 +244,10 @@ mod tests {
             .replace_project_timeline(id, "old timeline", "new timeline", "t1")
             .await
             .unwrap());
-        db.update_project_info(id, Some("new title"), None, "t2")
+        db.update_project_info(id, Some("new title"), None, None, "t2")
             .await
             .unwrap();
-        db.update_project_info(id, None, Some("note"), "t3")
+        db.update_project_info(id, None, Some("note"), None, "t3")
             .await
             .unwrap();
         db.mark_project_posted(id, "BV1xx").await.unwrap();
@@ -255,6 +262,25 @@ mod tests {
             ("new title", "note", "new timeline")
         );
         assert_eq!((saved.status, saved.bvid.as_str()), (1, "BV1xx"));
+    }
+
+    #[tokio::test]
+    async fn stale_rename_reports_current_title_without_writing() {
+        let db = database().await;
+        let id = db.add_project(&project()).await.unwrap().id;
+        let rename =
+            |title, base, time| db.update_project_info(id, Some(title), None, Some(base), time);
+        assert_eq!(rename("remote", "old title", "t1").await.unwrap(), None);
+        assert_eq!(
+            rename("draft", "old title", "t2").await.unwrap().as_deref(),
+            Some("remote")
+        );
+        let saved = db.get_project(id).await.unwrap();
+        assert_eq!(
+            (saved.title.as_str(), saved.updated_at.as_str()),
+            ("remote", "t1")
+        );
+        assert_eq!(rename("draft", "remote", "t3").await.unwrap(), None);
     }
 
     #[tokio::test]

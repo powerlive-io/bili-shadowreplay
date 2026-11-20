@@ -410,11 +410,18 @@ pub async fn update_project_info(
     id: i64,
     title: Option<String>,
     note: Option<String>,
-) -> Result<(), String> {
+    expected_title: Option<String>,
+) -> Result<Option<String>, String> {
     let now = Local::now().to_rfc3339();
     Ok(state
         .db
-        .update_project_info(id, title.as_deref(), note.as_deref(), &now)
+        .update_project_info(
+            id,
+            title.as_deref(),
+            note.as_deref(),
+            expected_title.as_deref(),
+            &now,
+        )
         .await?)
 }
 

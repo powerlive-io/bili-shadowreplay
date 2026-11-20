@@ -314,7 +314,7 @@ pub(super) async fn update_project_info(state: &State, args: &Value) -> Result<V
         .get_project(id)
         .await
         .map_err(|_| format!("Project {id} not found"))?;
-    handlers::project::update_project_info(command_state!(state), id, title, note).await?;
+    handlers::project::update_project_info(command_state!(state), id, title, note, None).await?;
     get_project(state, args).await
 }
 
