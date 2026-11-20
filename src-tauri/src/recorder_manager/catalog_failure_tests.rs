@@ -47,7 +47,7 @@ async fn manager(dir: &Path) -> (RecorderManager, RecorderEventReceiver) {
             task_manager: Arc::new(TaskManager::new()),
             resource_dir: dir.into(),
             recorders: Arc::new(RwLock::new(HashMap::new())),
-            to_remove: Arc::new(RwLock::new(HashSet::new())),
+            to_remove: Default::default(),
             webhook_poster: WebhookPoster::new(crate::webhook::poster::WebhookConfig::default())
                 .unwrap(),
             material_hook: Arc::new(std::sync::OnceLock::new()),
@@ -83,7 +83,7 @@ impl Drop for Stopped {
 }
 
 #[tokio::test]
-async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker() {
+async fn competing_removal_cannot_release_an_aborted_recordings_claim() {
     let directory = tempfile::tempdir().unwrap();
     let (manager, rx) = manager(directory.path()).await;
     let consumer = manager.clone();
@@ -94,6 +94,12 @@ async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker
     manager
         .abort_failed_recording(PlatformType::BiliBili, "room", "failed")
         .await;
+    assert!(matches!(
+        manager
+            .remove_recorder(PlatformType::BiliBili, "room")
+            .await,
+        Err(RecorderManagerError::Removing { .. })
+    ));
     // This is the guard insert_recorder retains while waiting to insert.
     let removing = manager.to_remove.read().await;
     assert!(removing.contains("bilibili:room"));
@@ -107,8 +113,7 @@ async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker
     .unwrap();
     drop(map_reader);
 
-    // Cleanup gets the map first. It must release it even while our insertion
-    // guard prevents removal-marker cleanup; otherwise this is a lock cycle.
+    // Cleanup must release its claim even with an insertion guard held.
     let map_writer = tokio::time::timeout(Duration::from_secs(5), manager.recorders.write())
         .await
         .expect("failed-recording cleanup must not deadlock recorder insertion");
