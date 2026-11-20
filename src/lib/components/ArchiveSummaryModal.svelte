@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { archiveKey } from "../archives";
-  import { marked } from "marked";
+  import { renderSafeMarkdown } from "../safe-markdown";
   import { AlertCircle, Loader2, RefreshCw, Sparkles, X } from "lucide-svelte";
   import { invoke } from "../invoker";
   import { archiveFilesAvailable, archiveStorageReason } from "../recording-storage";
@@ -250,7 +250,7 @@
         {:else if summary?.status === "success"}
           <div class="space-y-5">
             <div class="summary-markdown text-[13px] text-fg">
-              {@html marked(summaryMarkdown)}
+              {@html renderSafeMarkdown(summaryMarkdown)}
             </div>
 
             {#if highlights.length > 0}
