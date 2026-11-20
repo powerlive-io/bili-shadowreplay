@@ -78,7 +78,7 @@ export function taskTypeName(taskType: string) {
       return "投稿";
     case "upload_project":
       return "切片投稿";
-    case "clip_video":
+    case "clip_video": // Kept for task history from older releases.
       return "切片裁剪";
     case "upload_procedure":
       return "切片投稿";
@@ -145,7 +145,6 @@ const CANCELLABLE_TASK_TYPES = new Set([
   "generate_materials",
   "export_project",
   "render_material_danmu",
-  "clip_video",
   "encode_video_subtitle",
   "generate_whole_clip",
   "generate_archive_summary",

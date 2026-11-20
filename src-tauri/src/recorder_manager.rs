@@ -2277,10 +2277,6 @@ impl RecorderManager {
             crate::ffmpeg::get_random_thumbnail_timestamp(duration),
         )
         .await;
-        if let Some(reporter) = reporter {
-            reporter.update("生成音频预览").await;
-        }
-        let _ = crate::ffmpeg::extract_audio_sample(Path::new(&output_path)).await;
 
         if let Some(reporter) = reporter {
             reporter.update("保存素材").await;

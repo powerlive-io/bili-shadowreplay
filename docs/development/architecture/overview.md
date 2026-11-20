@@ -13,7 +13,7 @@ BiliBili ShadowReplay 是一个基于 Tauri 2 的混合桌面应用，采用前�
 - **构建工具**: Vite
 - **UI 框架**: Tailwind CSS + Flowbite
 - **AI 集成**: Rust Rig Agent（OpenAI 兼容 API、Ollama）
-- **音频可视化**: WaveSurfer.js
+- **音频可视化**: 时间轴显示由后端从素材音轨计算的波形峰值
 - **实时通信**: Socket.io
 
 ### 后端技术栈
@@ -177,7 +177,7 @@ src-tauri/
 
 - **recorder**: 核心录制功能，包含多平台实现
 - **danmu_stream**: 弹幕流处理，支持实时弹幕捕获和存储
-- **ffmpeg_utils**: 应用层与 recorder 共用的 `ffmpeg-next` 媒体探测与 `VideoMetadata` 类型；fMP4 通过可 seek 的 AVIO 拼接 init 和 media；音频解码、单声道 PCM 重采样由阻塞工作线程流式送入 sink，供波形和 WAV 提取复用。范围 WAV 使用 `libavfilter` 保留 CLI 的 seek、时间戳恢复与逐帧截止行为；预览 FLAC 沿首音轨的样本网格裁剪，统一输出 48 kHz 双声道与固定 4096 样本块；素材和 PowerLive Opus 共用 `libopus` 编码器与 Ogg muxer，分别使用 16 kHz 单声道／64 kbps 和保留源声道／128 kbps 两种配置，保留音轨延迟和时间戳间隙。原生编码共用带取消中断和显式关闭错误检查的输出 I/O，完成并关闭临时文件后才发布输出；视频编码与多输入合成复用格式协商、帧率同步和逐包输出，复杂图按需求读取各输入，仅有界暂存未请求轨道的压缩包。BGRA 渲染器复制到原生帧后才回收缓冲区，任务与渲染器共同保留临时素材
+- **ffmpeg_utils**: 应用层与 recorder 共用的 `ffmpeg-next` 媒体探测与 `VideoMetadata` 类型；fMP4 通过可 seek 的 AVIO 拼接 init 和 media；音频解码、单声道 PCM 重采样由阻塞工作线程流式送入 sink，供波形和 WAV 提取复用。范围 WAV 使用 `libavfilter` 保留 CLI 的 seek、时间戳恢复与逐帧截止行为；预览 FLAC 沿首音轨的样本网格裁剪，统一输出 48 kHz 双声道与固定 4096 样本块；PowerLive 上传音频通过 `libopus` 编码为 128 kbps Ogg/Opus，保留源声道、音轨延迟和时间戳间隙。原生编码共用带取消中断和显式关闭错误检查的输出 I/O，完成并关闭临时文件后才发布输出；视频编码与多输入合成复用格式协商、帧率同步和逐包输出，复杂图按需求读取各输入，仅有界暂存未请求轨道的压缩包。BGRA 渲染器复制到原生帧后才回收缓冲区，任务与渲染器共同保留临时素材
 
 ## 数据流
 

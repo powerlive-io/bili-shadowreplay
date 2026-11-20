@@ -1,5 +1,5 @@
 //! Files that belong to a material (an entry of the `videos` table) and share
-//! its file stem: thumbnail, waveform sample, cached subtitles, the danmaku cut
+//! its file stem: thumbnail, cached subtitles, the danmaku cut
 //! from its recording and waveform peaks.
 
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ pub fn peaks_path(video: &Path) -> PathBuf {
     video.with_extension("peaks.json")
 }
 
-/// Sidecar files to remove together with the material.
+/// Sidecar files to remove together with the material, including legacy Opus samples.
 pub fn sidecar_paths(video: &Path) -> Vec<PathBuf> {
     ["srt", "wav", "mp3", "opus", "danmu.json", "peaks.json"]
         .iter()

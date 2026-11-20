@@ -2187,11 +2187,6 @@ w3c-xmlserializer@^5.0.0:
   dependencies:
     xml-name-validator "^5.0.0"
 
-wavesurfer.js@^7.11.0:
-  version "7.11.0"
-  resolved "https://registry.yarnpkg.com/wavesurfer.js/-/wavesurfer.js-7.11.0.tgz#989b7d2044db0538abc5a37eb730b9a53bb40903"
-  integrity sha512-LOGdIBIKv/roYuQYClhoqhwbIdQL1GfobLnS2vx0heoLD9lu57OUHWE2DIsCNXBvCsmmbkUvJq9W8bPLPbikGw==
-
 webidl-conversions@^7.0.0:
   version "7.0.0"
   resolved "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-7.0.0.tgz#256b4e1882be7debbf01d05f0aa2039778ea080a"

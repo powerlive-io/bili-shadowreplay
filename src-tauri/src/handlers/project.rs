@@ -534,16 +534,6 @@ pub(crate) async fn set_project_clips(
     single_project_view(state, state.db.get_project(id).await?).await
 }
 
-/// Turn burning danmaku into the project's exports and uploads on or off.
-#[cfg_attr(feature = "gui", tauri::command)]
-pub async fn update_project_danmu(
-    state: state_type!(),
-    id: i64,
-    danmu: bool,
-) -> Result<(), String> {
-    set_project_danmu(&state, id, danmu).await
-}
-
 /// Patch output settings shared with uploads, independently of timeline edits.
 /// Omitted fields keep their latest saved values; render settings are one field
 /// because codec, priority and bitrate together select the encoding behavior.

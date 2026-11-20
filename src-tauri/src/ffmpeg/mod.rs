@@ -17,12 +17,12 @@ pub mod runner;
 pub mod subtitle;
 mod subtitle_native;
 
+pub use audio::extract_full_audio;
 #[cfg(test)]
 pub(crate) use audio::get_audio_duration;
-pub use audio::{extract_audio_sample, extract_full_audio};
+pub use clip::transcode;
 #[cfg(test)]
 pub use clip::trim_video;
-pub use clip::{clip_from_video_file, transcode};
 pub use danmu::{encode_video_danmu, encode_video_danmu_with_settings};
 pub use metadata::{
     check_ffmpeg, check_videos, extract_frame, generate_thumbnail, get_random_thumbnail_timestamp,
