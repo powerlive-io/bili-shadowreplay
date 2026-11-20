@@ -39,9 +39,9 @@ use crate::{
         project::{
             create_project, delete_project, export_project, generate_materials, get_material_danmu,
             get_material_peaks, get_material_usage, get_project, get_project_frame_rate,
-            get_projects, update_project_danmu, update_project_info,
-            update_project_output_settings, update_project_timeline, ExportStarted,
-            GeneratedMaterials, OverlayImage, ProjectBrief, ProjectView,
+            get_projects, update_project_info, update_project_output_settings,
+            update_project_timeline, ExportStarted, GeneratedMaterials, OverlayImage, ProjectBrief,
+            ProjectView,
         },
         recorder::{
             add_recorder, delete_archive, delete_archives, export_danmu, fetch_hls,
@@ -67,11 +67,10 @@ use crate::{
             StoragePoolInfo,
         },
         video::{
-            batch_import_external_videos, cancel, clip_range, clip_video, delete_video,
-            encode_video_subtitle, generate_audio_sample, generate_video_subtitle, get_all_videos,
-            get_file_size, get_import_progress, get_video, get_video_cover, get_video_subtitle,
-            get_video_typelist, get_videos, import_external_video, update_video_cover,
-            update_video_note, update_video_subtitle, upload_procedure,
+            batch_import_external_videos, cancel, clip_range, delete_video, encode_video_subtitle,
+            generate_video_subtitle, get_all_videos, get_file_size, get_import_progress, get_video,
+            get_video_cover, get_video_subtitle, get_video_typelist, get_videos,
+            import_external_video, update_video_cover, update_video_note, upload_procedure,
         },
         AccountInfo,
     },
@@ -1204,20 +1203,6 @@ async fn handler_get_video(
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GenerateAudioSampleRequest {
-    video_id: i64,
-}
-
-async fn handler_generate_audio_sample(
-    state: axum::extract::State<State>,
-    Json(param): Json<GenerateAudioSampleRequest>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    generate_audio_sample(state.0, param.video_id).await?;
-    Ok(Json(ApiResponse::success(())))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct GetVideosRequest {
     room_id: String,
 }
@@ -1359,21 +1344,6 @@ struct UpdateProjectTimelineRequest {
     timeline: Timeline,
     #[serde(default)]
     base: Option<Timeline>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateProjectDanmuRequest {
-    id: i64,
-    danmu: bool,
-}
-
-async fn handler_update_project_danmu(
-    state: axum::extract::State<State>,
-    Json(param): Json<UpdateProjectDanmuRequest>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    update_project_danmu(state.0, param.id, param.danmu).await?;
-    Ok(Json(ApiResponse::success(())))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1853,23 +1823,6 @@ async fn handler_get_video_subtitle(
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdateVideoSubtitleRequest {
-    id: i64,
-    subtitle: String,
-}
-
-async fn handler_update_video_subtitle(
-    state: axum::extract::State<State>,
-    Json(param): Json<UpdateVideoSubtitleRequest>,
-) -> Result<Json<ApiResponse<()>>, ApiError> {
-    update_video_subtitle(state.0, param.id, param.subtitle)
-        .await
-        .map_err(|_| ApiError::from("Failed to update video subtitle"))?;
-    Ok(Json(ApiResponse::success(())))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct UpdateVideoNoteRequest {
     id: i64,
     note: String,
@@ -1961,32 +1914,6 @@ async fn handler_import_external_video(
         param.file_path.clone(),
         param.title,
         param.room_id,
-    )
-    .await?;
-    Ok(Json(ApiResponse::success(param.event_id)))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClipVideoRequest {
-    event_id: String,
-    parent_video_id: i64,
-    start_time: f64,
-    end_time: f64,
-    clip_title: String,
-}
-
-async fn handler_clip_video(
-    state: axum::extract::State<State>,
-    Json(param): Json<ClipVideoRequest>,
-) -> Result<Json<ApiResponse<String>>, ApiError> {
-    clip_video(
-        state.0,
-        param.event_id.clone(),
-        param.parent_video_id,
-        param.start_time,
-        param.end_time,
-        param.clip_title,
     )
     .await?;
     Ok(Json(ApiResponse::success(param.event_id)))
@@ -2979,10 +2906,6 @@ pub async fn start_api_server(state: State) {
                 "/api/generate_archive_subtitle",
                 post(handler_generate_archive_subtitle),
             )
-            .route(
-                "/api/update_video_subtitle",
-                post(handler_update_video_subtitle),
-            )
             .route("/api/update_video_cover", post(handler_update_video_cover))
             .route("/api/update_video_note", post(handler_update_video_note))
             .route(
@@ -2993,7 +2916,6 @@ pub async fn start_api_server(state: State) {
                 "/api/import_external_video",
                 post(handler_import_external_video),
             )
-            .route("/api/clip_video", post(handler_clip_video))
             .route(
                 "/api/generate_whole_clip",
                 post(handler_generate_whole_clip),
@@ -3066,10 +2988,6 @@ pub async fn start_api_server(state: State) {
             .route(
                 "/api/update_project_timeline",
                 post(handler_update_project_timeline),
-            )
-            .route(
-                "/api/update_project_danmu",
-                post(handler_update_project_danmu),
             )
             .route(
                 "/api/update_project_output_settings",
@@ -3178,10 +3096,6 @@ pub async fn start_api_server(state: State) {
         // Video commands
         .route("/api/clip_range", post(handler_clip_range))
         .route("/api/get_video", post(handler_get_video))
-        .route(
-            "/api/generate_audio_sample",
-            post(handler_generate_audio_sample),
-        )
         .route("/api/get_videos", post(handler_get_videos))
         .route("/api/get_video_cover", post(handler_get_video_cover))
         .route("/api/get_all_videos", post(handler_get_all_videos))

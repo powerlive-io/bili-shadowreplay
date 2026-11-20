@@ -2,8 +2,8 @@ use std::{num::NonZeroU32, path::Path};
 
 use crate::progress::progress_reporter::ProgressReporterTrait;
 use ffmpeg_utils::{
-    AudioEncodeOptions, InputSeek, MediaInput, MediaOutput, MediaPlan, NegativeTs, StreamMode,
-    StreamRoute, StreamSelector, SubtitleEncodeOptions,
+    AudioEncodeOptions, InputSeek, MediaInput, MediaOutput, MediaPlan, StreamMode, StreamRoute,
+    StreamSelector, SubtitleEncodeOptions,
 };
 
 use super::{
@@ -401,41 +401,6 @@ pub(super) async fn trim_video_with_timing<R: ProgressReporterTrait>(
         reporter,
     )
     .await
-}
-
-/// Cut a video range and encode it with the selected hardware/software encoder.
-pub async fn clip_from_video_file<R: ProgressReporterTrait>(
-    reporter: Option<&R>,
-    input_path: &Path,
-    output_path: &Path,
-    start_time: f64,
-    duration: f64,
-) -> Result<(), String> {
-    let output_folder = output_path
-        .parent()
-        .ok_or_else(|| format!("Output path has no parent: {}", output_path.display()))?;
-    std::fs::create_dir_all(output_folder)
-        .map_err(|error| format!("Failed to create output directory: {error}"))?;
-
-    let video_encoder = hwaccel::get_x264_encoder().await;
-    let video = hwaccel::native_video_options(video_encoder, None, None, None)?;
-    let mut plan = single_input_plan(
-        input_path,
-        output_path,
-        StreamMode::Video(video),
-        StreamMode::Audio(AudioEncodeOptions::default()),
-    );
-    plan.outputs[0].seek = Some(start_time);
-    plan.outputs[0].duration = Some(duration);
-    plan.outputs[0].negative_ts = NegativeTs::MakeZero;
-    run_native_media(
-        plan,
-        ProgressMode::stage("切片", ProgressTotal::Known(duration)),
-        "切片",
-        reporter,
-    )
-    .await
-    .map(|_| ())
 }
 
 #[cfg(test)]
