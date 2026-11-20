@@ -123,7 +123,8 @@
 
     inFlight += 1;
     try {
-      onGenerated?.(await generateMaterials(eventId, params, createProject, merge));
+      const result = await generateMaterials(eventId, params, createProject, merge);
+      onGenerated?.(result);
     } catch (error) {
       const message = String(error);
       // Cancelled from the task center, or elsewhere such as the task page.

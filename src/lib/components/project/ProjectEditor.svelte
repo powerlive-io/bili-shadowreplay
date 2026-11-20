@@ -31,6 +31,7 @@
   import { trapFocus } from "../../focus-trap";
   import RenderSettingsFields from "../RenderSettingsFields.svelte";
   import { save } from "@tauri-apps/plugin-dialog";
+  import type { CloseRequestedEvent } from "@tauri-apps/api/window";
   import { get_preview_audio_url, get_static_url, invoke, listen, log, set_title, TAURI_ENV } from "../../invoker";
   import {
     clamp,
@@ -260,7 +261,7 @@
   let previewFrameWidth = $state(0);
   let firstMaterialId = $derived(timeline.clips[0]?.material_id);
   let pendingResolution: RenderResolution | null = $state(null);
-  let resolutionSaving: Promise<void> | null = null;
+  let resolutionSaving: Promise<boolean> | null = null;
   let outputResolution = $derived(pendingResolution ?? timeline.render_settings?.resolution ?? defaultRenderSettings().resolution);
   let previewResolution = $derived(showExportSettings ? exportSettings.resolution : outputResolution);
   let outputDimensions = $derived.by(() => {
@@ -637,16 +638,26 @@
     if (!TAURI_ENV) return;
     const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     const current = getCurrentWebviewWindow();
-    // Tauri destroys the window once this settles: finish the edit in progress
-    // (closing does not blur it) and wait until everything is saved.
-    unlistenClose = await current.onCloseRequested(async () => {
+    unlistenClose = await current.onCloseRequested(handleCloseRequested);
+  });
+
+  async function handleCloseRequested(event: CloseRequestedEvent) {
+    try {
+      // Closing does not blur the current edit. Tauri destroys the window after
+      // this handler returns unless we explicitly keep it open for a retry.
       endEdit();
       finishEditing();
       settleOverlayEdit();
+      if (await resolutionSaving === false) {
+        event.preventDefault(); // The resolution action already reported its error.
+        return;
+      }
       await saveAll();
-      await resolutionSaving;
-    });
-  });
+    } catch (error) {
+      event.preventDefault();
+      alert("保存失败，窗口未关闭。请重试：" + error);
+    }
+  }
 
   onDestroy(() => {
     cancelAnimationFrame(frame);
@@ -655,7 +666,7 @@
     player?.dispose();
     previewAudio?.dispose();
     unlistenClose?.();
-    if (saveTimer) void flushSave();
+    if (saveTimer) autosaveTimeline();
   });
 
   $effect(() => {
@@ -707,41 +718,39 @@
   function scheduleSave() {
     saveState = "pending";
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void flushSave(), SAVE_DELAY_MS);
+    saveTimer = setTimeout(autosaveTimeline, SAVE_DELAY_MS);
   }
 
-  /** Save the timeline now, after any save already running, until it is saved. */
+  function autosaveTimeline() {
+    void flushSave().catch((error) => log.error("Failed to save project timeline:", error));
+  }
+
+  /** Share in-flight writes and drain edits made during them. Failures remain retryable. */
   async function flushSave() {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = null;
-    while (saving) await saving;
-    if (saveState === "saved") return;
-    const snapshot = timeline;
+    while (saving || saveState !== "saved") {
+      saving ??= saveTimelineSnapshot(timeline).finally(() => (saving = null));
+      await saving;
+    }
+  }
+
+  async function saveTimelineSnapshot(snapshot: ProjectTimeline) {
     saveState = "saving";
-    let saved = false;
-    let editedMeanwhile = false;
-    let unsaved = false;
-    saving = (async () => {
-      try {
-        const view = await invoke<ProjectItem>("update_project_timeline", {
-          id: projectId,
-          timeline: snapshot,
-          base: parseTimeline(syncedTimeline),
-        });
-        editedMeanwhile = timeline !== snapshot;
-        // Merged against what was sent: the backend keeps its danmaku setting
-        // and drops clips of materials deleted meanwhile.
-        unsaved = applyProjectView(view, snapshot);
-        saved = true;
-        saveState = editedMeanwhile || unsaved ? "pending" : "saved";
-      } catch (error) {
-        log.error("Failed to save project timeline:", error);
-        saveState = "error";
-      }
-    })().finally(() => (saving = null));
-    await saving;
-    // Edits made during the save, or by merging its result.
-    if (saved && (editedMeanwhile || unsaved)) await flushSave();
+    try {
+      const view = await invoke<ProjectItem>("update_project_timeline", {
+        id: projectId,
+        timeline: snapshot,
+        base: parseTimeline(syncedTimeline),
+      });
+      const editedMeanwhile = timeline !== snapshot;
+      // The backend keeps its danmaku setting and drops clips of deleted materials.
+      const unsaved = applyProjectView(view, snapshot);
+      saveState = editedMeanwhile || unsaved ? "pending" : "saved";
+    } catch (error) {
+      saveState = "error";
+      throw error;
+    }
   }
 
   /** Apply an edit as one undo step. */
@@ -886,16 +895,12 @@
 
   async function saveInfo() {
     if (!project || title === project.title) return;
-    try {
-      // Only the title: the note is edited from the projects list.
-      const saved = title;
-      await invoke("update_project_info", { id: projectId, title: saved });
-      // So a later change back is saved too, before the refresh reports it.
-      if (project) project = { ...project, title: saved };
-      await set_title(saved || "切片");
-    } catch (error) {
-      alert("保存切片信息失败：" + error);
-    }
+    // Only the title: the note is edited from the projects list.
+    const saved = title;
+    await invoke("update_project_info", { id: projectId, title: saved });
+    // So a later change back is saved too, before the refresh reports it.
+    if (project) project = { ...project, title: saved };
+    await set_title(saved || "切片");
   }
 
   // ---- Overlays ------------------------------------------------------------
@@ -1602,8 +1607,10 @@
           renderSettings: { ...(timeline.render_settings ?? defaultRenderSettings()), resolution },
         });
         await projectRefresh.run();
+        return true;
       } catch (error) {
         alert("保存分辨率失败：" + error);
+        return false;
       } finally {
         pendingResolution = null;
       }
@@ -1848,7 +1855,7 @@
         KeyY: redo,
         KeyB: splitAtPlayhead,
         KeyD: duplicateSelectedOverlay,
-        KeyS: () => void saveAll(),
+        KeyS: () => void saveAll().catch((error) => alert("保存失败：" + error)),
         Digit3: () => setSubtitleBoundary("start"),
         Digit4: () => setSubtitleBoundary("end"),
       }[event.code];
@@ -1897,7 +1904,7 @@
       bind:value={title}
       placeholder="未命名切片"
       title="切片标题"
-      onblur={saveInfo}
+      onblur={() => saveInfo().catch((error) => alert("保存切片信息失败：" + error))}
       onkeydown={(event) => {
         if (event.key === "Enter") (event.currentTarget as HTMLInputElement).blur();
       }}
@@ -1909,7 +1916,7 @@
         已保存
       {:else if saveState === "error"}
         保存失败
-        <button type="button" onclick={() => void flushSave()}>重试</button>
+        <button type="button" onclick={autosaveTimeline}>重试</button>
       {:else}
         保存中…
       {/if}
