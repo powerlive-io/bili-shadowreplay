@@ -176,6 +176,7 @@
   let title = $state("");
   // The title this draft was edited from, not necessarily the latest project view.
   let titleBase = "";
+  let latestTitle = "";
   let titleSaving: Promise<void> | null = null;
   let titleWrites = 0;
   let timeline: ProjectTimeline = $state.raw(parseTimeline(""));
@@ -531,7 +532,7 @@
       project = view;
       // Overlays or sounds a material deleted meanwhile left overlapping were lifted apart.
       if (loaded.tracks !== parsed.tracks || loaded.audio_tracks !== parsed.audio_tracks) scheduleSave();
-      title = titleBase = view.title;
+      title = titleBase = latestTitle = view.title;
       await set_title(view.title || "切片");
       await loadMaterials();
       void loadMaterialData(timeline);
@@ -870,6 +871,7 @@
   }
 
   async function receiveTitle(remote: string) {
+    latestTitle = remote;
     if (remote === titleBase || (title !== titleBase && title !== remote)) return;
     title = titleBase = remote;
     await set_title(remote || "切片");
@@ -881,6 +883,7 @@
         id: projectId, title: saved, expectedTitle: expected,
       });
       if (current == null || current === saved) break;
+      latestTitle = current;
       if (title !== saved) return; // A newer draft must make its own decision.
       if (!await confirm(`标题已被改为「${current}」。要用本地标题「${saved}」替换它吗？`)) {
         throw new Error("未覆盖最新标题，本地草稿已保留。");
@@ -888,7 +891,7 @@
       if (title !== saved) return;
       expected = current; // Only overwrite the version the user just saw.
     }
-    titleBase = saved;
+    titleBase = latestTitle = saved;
     await set_title(saved || "切片");
   }
 
@@ -904,6 +907,8 @@
       }
       await titleSaving;
     }
+    // Undoing the draft may have exposed a rename we couldn't adopt while typing.
+    if (titleBase !== latestTitle) await receiveTitle(latestTitle);
   }
 
   // ---- Overlays ------------------------------------------------------------

@@ -20,7 +20,7 @@ function fixture() {
   const state = vm.createContext({
     saveTimer: null, saving: null, saveState: "pending", resolutionSaving: null,
     timeline: { clips: [] }, syncedTimeline: "{}", parseTimeline: JSON.parse,
-    projectId: 1, project: { title: "old" }, title: "new", titleBase: "old",
+    projectId: 1, project: { title: "old" }, title: "new", titleBase: "old", latestTitle: "old",
     titleSaving: null, titleWrites: 0, projectRefresh: { schedule() {} },
     applyProjectView: () => false, set_title: async () => {},
     endEdit() {}, finishEditing() {}, settleOverlayEdit() {},
@@ -152,3 +152,27 @@ test("blur and close share a title write, drain later edits, and ignore a stale 
   assert.equal(state.title, "old");
   assert.deepEqual(writes, [["old", "new"], ["new", "old"]]);
 });
+
+for (const source of ["refresh", "in-flight conflict"]) {
+  test(`undoing a title draft adopts the rename from ${source} before saveAll returns`, async () => {
+    const { state } = fixture();
+    state.saveState = "saved";
+    const reply = Promise.withResolvers();
+    const calls = [];
+    state.invoke = async (cmd) => {
+      calls.push(cmd);
+      return cmd === "get_project" ? { title: "remote" } : reply.promise;
+    };
+    let blur;
+    if (source === "refresh") await state.refreshProject();
+    else blur = state.saveInfo();
+    assert.equal(state.title, "new");
+    state.title = "old";
+    const flush = state.saveAll();
+    reply.resolve("remote");
+    await Promise.all([blur, flush]);
+    assert.equal(state.title, "remote");
+    assert.equal(state.titleBase, "remote");
+    assert.deepEqual(calls, [source === "refresh" ? "get_project" : "update_project_info"]);
+  });
+}
