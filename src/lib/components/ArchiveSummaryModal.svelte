@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { untrack } from "svelte";
+  import { archiveKey } from "../archives";
   import { marked } from "marked";
   import { AlertCircle, Loader2, RefreshCw, Sparkles, X } from "lucide-svelte";
   import { invoke } from "../invoker";
@@ -31,13 +32,13 @@
   let loading = $state(false);
   let actionLoading = $state(false);
   let error = $state("");
-  let loadedKey = $state("");
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let llmConfig: LlmConfig | null = $state(null);
-  let llmLoadedKey = $state("");
   let llmConfigLoading = $state(true);
   let llmConfigError = $state(false);
 
+  type Session = { platform: string; roomId: string; liveId: string };
+  let session: Session | null = null;
 
   function clearPoll() {
     if (pollTimer) {
@@ -46,14 +47,14 @@
     }
   }
 
-  function close() {
+  function endSession() {
+    session = null;
     clearPoll();
+  }
+
+  function close() {
+    endSession();
     showModal = false;
-    loadedKey = "";
-    llmLoadedKey = "";
-    llmConfig = null;
-    llmConfigLoading = true;
-    llmConfigError = false;
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -68,75 +69,65 @@
     window.dispatchEvent(new CustomEvent("navigate-settings", { detail: "llm" }));
   }
 
-  async function loadSummary(showLoading = true) {
-    if (!archive) return;
-    if (showLoading) loading = true;
-    error = "";
+  async function loadSummary(target: Session) {
     try {
-      summary = await invoke<RecordSummary | null>("get_archive_summary", {
-        platform: archive.platform,
-        roomId: archive.room_id,
-        liveId: archive.live_id,
-      });
+      const result = await invoke<RecordSummary | null>("get_archive_summary", target);
+      if (session !== target) return;
+      summary = result;
       emitStatus();
-      if (summary?.status === "processing") schedulePoll();
+      if (summary?.status === "processing") schedulePoll(target);
       else clearPoll();
     } catch (loadError) {
-      error = String(loadError);
+      if (session === target) error = String(loadError);
     } finally {
-      loading = false;
+      if (session === target) loading = false;
     }
   }
 
-  function schedulePoll() {
+  function schedulePoll(target: Session) {
     clearPoll();
-    pollTimer = setTimeout(async () => {
-      await loadSummary(false);
+    pollTimer = setTimeout(() => {
+      if (session === target) void loadSummary(target);
     }, 2000);
   }
 
-  async function loadLlmConfig(key: string) {
-    llmConfigLoading = true;
-    llmConfigError = false;
+  async function loadLlmConfig(target: Session) {
     try {
-      llmConfig = await invoke<LlmConfig>("get_llm_config");
-      llmLoadedKey = key;
+      const config = await invoke<LlmConfig>("get_llm_config");
+      if (session === target) llmConfig = config;
     } catch {
       // 读取失败时无法校验 API Key，保守禁止生成并提示前往设置
-      llmConfig = null;
-      llmConfigError = true;
+      if (session === target) llmConfigError = true;
     } finally {
-      llmConfigLoading = false;
+      if (session === target) llmConfigLoading = false;
     }
   }
 
   async function generate(force: boolean) {
-    if (!archive || !archiveFilesAvailable(archive) || actionLoading) return;
+    const target = session;
+    if (!target || !archive || !archiveFilesAvailable(archive) || actionLoading) return;
     actionLoading = true;
     error = "";
     try {
-      const task = await invoke<TaskRow>("generate_archive_summary", {
-        platform: archive.platform,
-        roomId: archive.room_id,
-        liveId: archive.live_id,
-        force,
-      });
+      const task = await invoke<TaskRow>("generate_archive_summary", { ...target, force });
+      if (session !== target) return;
       summary = {
         ...(summary || ({} as RecordSummary)),
-        platform: archive.platform,
-        room_id: archive.room_id,
-        live_id: archive.live_id,
+        platform: target.platform,
+        room_id: target.roomId,
+        live_id: target.liveId,
         status: "processing",
         stage: summary?.subtitle_text && !force ? "summarizing" : "extracting_audio",
         task_id: task.id,
       };
       emitStatus();
-      schedulePoll();
+      schedulePoll(target);
     } catch (generateError) {
+      if (session !== target) return;
       error = String(generateError);
-      await loadSummary(false);
+      await loadSummary(target);
     } finally {
-      actionLoading = false;
+      if (session === target) actionLoading = false;
     }
   }
 
@@ -151,11 +142,11 @@
   }
 
   function emitStatus() {
-    if (!summary || !archive) return;
+    if (!summary) return;
     onUpdated?.({
-      platform: archive.platform,
-      room_id: archive.room_id,
-      live_id: archive.live_id,
+      platform: summary.platform,
+      room_id: summary.room_id,
+      live_id: summary.live_id,
       status: summary.status,
       stage: summary.stage,
     });
@@ -184,21 +175,26 @@
     }
   }
 
-  onDestroy(clearPoll);
-  let currentKey = $derived(archive
-    ? `${archive.platform}:${archive.room_id}:${archive.live_id}`
-    : "");
-  let llmKey = $derived(showModal && archive ? "load" : "");
+  function startSession(record: RecordItem) {
+    const target = { platform: record.platform, roomId: record.room_id, liveId: record.live_id };
+    session = target;
+    summary = null;
+    loading = true;
+    actionLoading = false;
+    error = "";
+    llmConfig = null;
+    llmConfigLoading = true;
+    llmConfigError = false;
+    void loadSummary(target);
+    void loadLlmConfig(target);
+  }
+
+  // Refreshing list metadata is not a new opening; reopening the same archive is.
+  let currentKey = $derived(showModal && archive ? archiveKey(archive) : null);
   $effect(() => {
-    if (llmKey && !llmLoadedKey) {
-      void loadLlmConfig(llmKey);
-    }
-  });
-  $effect(() => {
-    if (showModal && archive && currentKey !== loadedKey) {
-      loadedKey = currentKey;
-      void loadSummary();
-    }
+    if (currentKey === null) return;
+    untrack(() => startSession(archive!));
+    return endSession;
   });
   let needsApiKey = $derived(
     llmConfig?.provider === "openai" && !(llmConfig.api_key || "").trim()

@@ -155,13 +155,14 @@ test("saved summaries/subtitles remain readable while generation and highlight c
   const archive = row("missing", false);
   const state = await handlers("lib/components/ArchiveSummaryModal.svelte", {
     archive, actionLoading: false, loading: false, error: "", summary: null, pollTimer: null,
+    session: { platform: archive.platform, roomId: archive.room_id, liveId: archive.live_id },
     invoke: async (command) => {
       requests.push(command);
       return { status: "success", summary_markdown: "Saved summary", subtitle_srt: "Saved subtitle" };
     },
     onUpdated() {},
   });
-  await state.loadSummary();
+  await state.loadSummary(state.session);
   assert.equal(state.summary.summary_markdown, "Saved summary");
   assert.equal(state.summary.subtitle_srt, "Saved subtitle");
   await state.generate(false);
