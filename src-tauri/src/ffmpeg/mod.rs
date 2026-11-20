@@ -85,8 +85,9 @@ impl Range {
         self.end - self.start
     }
 
-    pub fn is_in(&self, v: f64) -> bool {
-        v >= self.start && v <= self.end
+    /// HLS selection includes segments touching either boundary of the requested range.
+    pub(crate) fn intersects_segment(&self, start: f64, end: f64) -> bool {
+        self.start <= self.end && start <= end && self.start <= end && start <= self.end
     }
 }
 
@@ -489,31 +490,20 @@ mod tests {
     }
 
     #[test]
-    fn test_range_is_in_inside() {
-        let r = Range {
-            start: 1.0,
-            end: 5.0,
-        };
-        assert!(r.is_in(3.0));
-    }
-
-    #[test]
-    fn test_range_is_in_at_boundaries() {
-        let r = Range {
-            start: 1.0,
-            end: 5.0,
-        };
-        assert!(r.is_in(1.0));
-        assert!(r.is_in(5.0));
-    }
-
-    #[test]
-    fn test_range_is_in_outside() {
-        let r = Range {
-            start: 1.0,
-            end: 5.0,
-        };
-        assert!(!r.is_in(0.9));
-        assert!(!r.is_in(5.1));
+    fn hls_segment_intersection_includes_containment_and_touching_boundaries() {
+        for (start, end, expected) in [
+            (12.0, 13.0, true), // Selection inside the segment.
+            (5.0, 25.0, true),  // Segment inside the selection.
+            (5.0, 15.0, true),
+            (15.0, 25.0, true),
+            (5.0, 10.0, true),
+            (20.0, 25.0, true),
+            (5.0, 9.0, false),
+            (21.0, 25.0, false),
+            (15.0, 12.0, false),
+        ] {
+            let range = Range { start, end };
+            assert_eq!(range.intersects_segment(10.0, 20.0), expected, "{range}");
+        }
     }
 }

@@ -1266,7 +1266,7 @@ impl RecorderManager {
             let mut duration = 0.0f64;
             let mut segments = Vec::new();
             for s in playlist.segments {
-                if range.is_in(duration) || range.is_in(duration + s.duration as f64) {
+                if range.intersects_segment(duration, duration + s.duration as f64) {
                     segments.push(s.clone());
                 }
                 duration += s.duration as f64;
