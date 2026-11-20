@@ -20,6 +20,10 @@ pub struct RecordRow {
     /// Configuration availability, not a filesystem or remote health probe.
     pub storage_available: bool,
     pub storage_unavailable_reason: Option<String>,
+    /// Only the in-memory startup preview sets this; not a persisted column.
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub storage_initializing: bool,
 }
 
 // CREATE TABLE records (live_id INTEGER PRIMARY KEY, room_id TEXT, title TEXT, length INTEGER, size INTEGER, created_at TEXT);
@@ -113,6 +117,7 @@ impl Database {
             storage_backend_id: String::new(),
             storage_available: false,
             storage_unavailable_reason: None,
+            storage_initializing: false,
         };
         if let Some(catalogs) = self.catalogs.get() {
             let alias = self
@@ -274,7 +279,7 @@ impl Database {
         self.ensure_storage_schema().await?;
         if room_id.is_empty() {
             Ok(sqlx::query_as::<_, RecordRow>(
-                "SELECT * FROM recording_records ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                "SELECT * FROM recording_records ORDER BY created_at DESC, live_id ASC LIMIT $1 OFFSET $2",
             )
             .bind(limit)
             .bind(offset)

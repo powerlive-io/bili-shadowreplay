@@ -46,33 +46,35 @@ export function sortArchives(records: RecordItem[], field: ArchiveSortField, ord
   });
 }
 
-/** Load every page before local sorting/pagination so older recordings remain reachable. */
+/** Publish complete pages as they arrive, then return the full, deduplicated snapshot. */
 export async function loadRoomArchives(
-  room: ArchiveRoom,
+  room: ArchiveRoom | null,
   active: () => boolean = () => true,
+  onProgress?: (records: RecordItem[]) => void,
 ): Promise<RecordItem[]> {
   const pageSize = 100;
   const records = new Map<string, RecordItem>();
   for (let offset = 0; active(); offset += pageSize) {
     const page = await invoke<RecordItem[]>("get_archives", {
-      platform: room.platform,
-      roomId: room.room_id,
+      platform: room?.platform,
+      roomId: room?.room_id ?? "",
       offset,
       limit: pageSize,
     });
     if (!active()) return [];
     const before = records.size;
-    for (const record of page) records.set(archiveKey(record), record);
+    for (const record of page) {
+      if (!active()) return [];
+      records.set(archiveKey(record), {
+        ...record,
+        cover: record.storage_available === false ? "" :
+          await get_static_url("cache", `${record.platform}/${record.room_id}/${record.live_id}/cover.jpg`),
+      });
+    }
+    if (!active()) return [];
     // Also stop if a server repeats a full page instead of honoring the offset.
     if (page.length < pageSize || records.size === before) break;
+    onProgress?.([...records.values()]);
   }
-  const result: RecordItem[] = [];
-  for (const record of records.values()) {
-    if (!active()) return [];
-    result.push({
-      ...record,
-      cover: await get_static_url("cache", `${record.platform}/${record.room_id}/${record.live_id}/cover.jpg`),
-    });
-  }
-  return result;
+  return [...records.values()];
 }

@@ -9,6 +9,7 @@
   import { formatBitrate, formatSize } from "../size-format";
   import { formatTimecode } from "../time-format";
   import { createStateRefresh, watchStateChanges } from "../state-refresh";
+  import { getStorageInitializationStatus } from "../storage-initialization";
   import type { RecordItem } from "../db";
   import type { RecorderInfo, RecorderStatus } from "../interface";
   import type { RtmpIngestInfo } from "../rtmp";
@@ -27,7 +28,7 @@
   let rtmpError = $state("");
   let archives: RecordItem[] = $state([]);
   let archivesLoading = $state(true);
-  let archivesLoaded = $state(false);
+  let archiveSnapshot = $state<"partial" | "complete" | null>(null);
   let archivesError = $state("");
   let coverUrl = $state<string | null>(null);
   let requestedCover: string | null = null;
@@ -40,6 +41,8 @@
   const currentRecord = $derived(status?.current_record ?? null);
   const check = $derived(status?.check);
   const archiveTotals = $derived(summarizeRoomArchives(archives, room.room_info, currentRecord));
+  const showArchiveTotals = $derived(archiveSnapshot === "complete" ||
+    (archiveSnapshot === "partial" && archiveTotals.count > 0));
 
   function releaseCover() {
     if (coverUrl) URL.revokeObjectURL(coverUrl);
@@ -87,10 +90,14 @@
   async function refreshArchives() {
     archivesLoading = true;
     try {
+      // A short (even empty) page is not a final room total during startup.
+      const init = await getStorageInitializationStatus();
+      if (disposed) return;
+      if (init.error) throw new Error(init.error);
       const result = await loadRoomArchives(room.room_info, () => !disposed);
       if (disposed) return;
       archives = result;
-      archivesLoaded = true;
+      archiveSnapshot = init.loading ? "partial" : "complete";
       archivesError = "";
     } catch (error) {
       if (!disposed) archivesError = `录播记录加载失败：${String(error)}`;
@@ -191,12 +198,13 @@
       <div class="recording-overview mt-4" role="group" aria-label="录制统计">
         <section aria-labelledby="room-recording-totals-title" class="min-w-0">
           <div class="flex min-h-5 flex-wrap items-center justify-between gap-2 text-[11px]">
-            <h3 id="room-recording-totals-title" class="text-[12px] font-medium text-fg-secondary">累计录制</h3>
-            {#if !archivesLoaded}<span class="text-fg-muted">{archivesLoading ? "加载中…" : "统计暂不可用"}</span>{/if}
+            <h3 id="room-recording-totals-title" class="text-[12px] font-medium text-fg-secondary">{archiveSnapshot === "complete" ? "累计录制" : "录制统计"}</h3>
+            {#if archiveSnapshot === "partial"}<span class="ui-badge ui-badge-accent">已加载部分</span>
+            {:else if !archiveSnapshot}<span class="text-fg-muted">{archivesLoading ? "加载中…" : "统计暂不可用"}</span>{/if}
           </div>
-          <dl aria-label="房间录制总计" aria-busy={archivesLoading && !archivesLoaded} title={archivesLoaded ? `统计这个房间现存的 ${archiveTotals.count} 条录播${info.recording ? "，包含当前正在录制的内容" : ""}。` : archivesLoading ? "正在加载全部录播记录" : "录播记录加载失败，暂时无法统计"} class="recording-metrics mt-2.5 grid grid-cols-2 gap-3">
-            <div><dt>总录制时长</dt><dd data-room-total="length">{archivesLoaded ? formatTimecode(archiveTotals.length, 0) : "—"}</dd></div>
-            <div><dt>总录制大小</dt><dd data-room-total="size">{archivesLoaded ? formatSize(archiveTotals.size) : "—"}</dd></div>
+          <dl aria-labelledby="room-recording-totals-title" aria-busy={archivesLoading && !archiveSnapshot} title={archiveSnapshot === "partial" ? `仅统计已加载的 ${archiveTotals.count} 条录播` : archiveSnapshot === "complete" ? `统计这个房间现存的 ${archiveTotals.count} 条录播${info.recording ? "，包含当前正在录制的内容" : ""}。` : undefined} class="recording-metrics mt-2.5 grid grid-cols-2 gap-3">
+            <div><dt>录制时长</dt><dd data-room-total="length">{showArchiveTotals ? formatTimecode(archiveTotals.length, 0) : "—"}</dd></div>
+            <div><dt>录制大小</dt><dd data-room-total="size">{showArchiveTotals ? formatSize(archiveTotals.size) : "—"}</dd></div>
           </dl>
           {#if archivesError}
             <div role="alert" class="mt-2 flex items-start gap-2 text-[12px] text-danger-fg">

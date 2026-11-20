@@ -257,6 +257,10 @@ pub struct CatalogLocation {
     store: CatalogStore,
     local_root: Option<PathBuf>,
 }
+
+/// A provisional, read-only observation during opening. A later read or the
+/// final revision check can still fail; this is not a committed catalog scan.
+pub type ScanObserver = Arc<dyn Fn(Uuid, &CatalogRecord) + Send + Sync>;
 // Only an in-process guard. Never presented as a cross-machine lock.
 fn writer_gate(uuid: Uuid) -> Arc<Mutex<()>> {
     static GATES: OnceLock<StdMutex<HashMap<Uuid, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -351,12 +355,23 @@ impl CatalogLocation {
         Ok(())
     }
     pub async fn open_writer(&self, create: bool) -> io::Result<CatalogWriter> {
+        self.open_writer_observed(create, None).await
+    }
+    pub async fn open_writer_observed(
+        &self,
+        create: bool,
+        observer: Option<ScanObserver>,
+    ) -> io::Result<CatalogWriter> {
         let location = self.clone();
-        tokio::spawn(async move { location.open_writer_inner(create).await })
+        tokio::spawn(async move { location.open_writer_inner(create, observer).await })
             .await
             .map_err(io::Error::other)?
     }
-    async fn open_writer_inner(self, create: bool) -> io::Result<CatalogWriter> {
+    async fn open_writer_inner(
+        self,
+        create: bool,
+        observer: Option<ScanObserver>,
+    ) -> io::Result<CatalogWriter> {
         // Local ownership is released automatically when the process exits.
         let local_lock = if let Some(root) = &self.local_root {
             let root = root.clone();
@@ -423,7 +438,9 @@ impl CatalogLocation {
                     "storage already has a writer in this process",
                 )
             })?;
-        let documents = self.load_documents(identity.storage_uuid).await?;
+        let documents = self
+            .load_documents(identity.storage_uuid, observer.as_ref())
+            .await?;
         let import = self.load_import().await?;
         if import
             .as_ref()
@@ -451,7 +468,11 @@ impl CatalogLocation {
             }),
         })
     }
-    async fn load_documents(&self, uuid: Uuid) -> io::Result<BTreeMap<Uuid, Document>> {
+    async fn load_documents(
+        &self,
+        uuid: Uuid,
+        observer: Option<&ScanObserver>,
+    ) -> io::Result<BTreeMap<Uuid, Document>> {
         let before = self.store.snapshot(RECORDS_PATH).await?;
         let mut documents = BTreeMap::new();
         let mut namespaces = HashMap::new();
@@ -470,6 +491,11 @@ impl CatalogLocation {
                     .is_some()
             {
                 return Err(conflict("duplicate recording namespace in catalog"));
+            }
+            if let Some(notify) = observer {
+                if doc.status == RecordStatus::Active {
+                    notify(uuid, &doc.entry.record);
+                }
             }
             documents.insert(doc.entry.record.recording_id, doc);
         }
@@ -644,7 +670,10 @@ impl CatalogReader {
     pub fn identity(&self) -> &StorageIdentity {
         &self.identity
     }
-    async fn documents(&self) -> io::Result<BTreeMap<Uuid, Document>> {
+    async fn documents(
+        &self,
+        observer: Option<&ScanObserver>,
+    ) -> io::Result<BTreeMap<Uuid, Document>> {
         let location = self
             .location
             .as_ref()
@@ -652,20 +681,25 @@ impl CatalogReader {
         if location.identity().await? != self.identity {
             return Err(invalid("storage identity changed"));
         }
-        location.load_documents(self.identity.storage_uuid).await
+        location
+            .load_documents(self.identity.storage_uuid, observer)
+            .await
     }
     pub async fn get(&self, id: Uuid) -> io::Result<Option<CatalogEntry>> {
         Ok(self
-            .documents()
+            .documents(None)
             .await?
             .get(&id)
             .filter(|d| d.status == RecordStatus::Active)
             .map(|d| d.entry.clone()))
     }
     pub async fn list(&self, cursor: Option<&str>, limit: usize) -> io::Result<CatalogPage> {
-        page(entries(&self.documents().await?), cursor, limit)
+        page(entries(&self.documents(None).await?), cursor, limit)
     }
     pub async fn scan(&self) -> io::Result<CatalogScan> {
+        self.scan_observed(None).await
+    }
+    pub async fn scan_observed(&self, observer: Option<&ScanObserver>) -> io::Result<CatalogScan> {
         let location = self
             .location
             .as_ref()
@@ -680,7 +714,7 @@ impl CatalogReader {
                 "finish import before rebuilding the index",
             ));
         }
-        let documents = self.documents().await?;
+        let documents = self.documents(observer).await?;
         if import != location.load_import().await? {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,

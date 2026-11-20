@@ -310,10 +310,10 @@
   onpointerdown={handlePointerDown} onscrollcapture={handleMenuScroll} onresize={closeActionMenu} />
 
 {#snippet deleteSelectedButton()}
-  <button class="ui-btn ui-btn-danger" disabled={selectedUnavailable} title={selectedUnavailable ? "选中项包含存储不可用的录播，无法删除文件；请先取消选择这些记录" : "删除选中的录播及文件"} onclick={() => { archiveToDelete = null; showDeleteConfirm = true; }}>
+  <button class="ui-btn ui-btn-danger" disabled={selectedUnavailable} title={selectedUnavailable ? "请先取消选择仅可查看的录播" : "删除选中的录播及文件"} onclick={() => { archiveToDelete = null; showDeleteConfirm = true; }}>
     <Trash2 class="h-3.5 w-3.5" />删除选中
   </button>
-  {#if selectedUnavailable}<span class="text-[11px] text-danger-fg">选中项含存储不可用的录播，文件操作已禁用</span>{/if}
+  {#if selectedUnavailable}<span class="text-[11px] text-fg-muted">选中项含仅可查看的录播，无法删除文件</span>{/if}
 {/snippet}
 
 {#snippet archiveActions(archive: RecordItem, placement: "row" | "row-menu" | "calendar-menu", onaction: () => void)}
@@ -374,7 +374,7 @@
               {#each roomOptions as option}<option value={option.key}>{option.label}</option>{/each}
             </select>
           {/if}
-          <span class="whitespace-nowrap text-[11px] text-fg-muted">共 <span class="tabular-nums">{filtered.length}</span> 条</span>
+          <span class="whitespace-nowrap text-[11px] text-fg-muted">{loading ? "已加载" : "共"} <span class="tabular-nums">{filtered.length}</span> 条</span>
           {#if $archiveViewMode === "list"}<label class="flex items-center gap-1.5 text-[11px] text-fg-muted">
             每页
             <select class="ui-input h-6 min-w-[56px] rounded-[6px] py-0 pl-2 text-[11px]" aria-label="每页录播数" bind:value={pageSize} onchange={changePageSize}>
@@ -412,7 +412,7 @@
     {/if}
 
     <div class="ui-card overflow-hidden" class:flex={$archiveViewMode === "calendar"} class:flex-col={$archiveViewMode === "calendar"} class:min-h-0={$archiveViewMode === "calendar"}>
-      {#if loading && archives.length === 0}
+      {#if loading && filtered.length === 0}
         <div role="status" class="flex items-center justify-center gap-2 p-10 text-[12px] text-fg-muted"><Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />正在加载录播记录…</div>
       {:else if filteredArchives.length === 0}
         <div class="flex flex-col items-center justify-center gap-2 p-10 text-[12px] text-fg-muted">

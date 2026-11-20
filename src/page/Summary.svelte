@@ -43,6 +43,7 @@
   let activeDropdown = $state(null);
   let loading = $state(false);
   let storageLoading = $state(true);
+  let statsLoaded = $state(false);
   let storageError = $state("");
   let offset = 0;
   let hasMore = $state(true);
@@ -94,7 +95,7 @@
     const status = await getStorageInitializationStatus();
     storageLoading = status.loading;
     storageError = status.error ? `存储元数据加载失败：${status.error}，请重启应用重试。` : "";
-    if (storageLoading || storageError) return;
+    if (storageError) return;
 
     disk_usage = await get_archive_disk_usage();
 
@@ -103,31 +104,26 @@
 
     // get today record count
     today_record_count = await get_today_record_count();
+    statsLoaded = true;
 
     // Refresh the visible window, not just the newest ID: backend removal changes
     // availability on existing rows without creating a new recording.
-    if (recent_records.length > 0) {
-      const visibleCount = recent_records.length;
-      const refreshed = await invoke<RecordItem[]>("get_recent_record", {
-        roomId: "",
-        offset: 0,
-        // A new recording can displace an old row even after pagination ended.
-        limit: visibleCount + 1,
-      });
-      const records = await Promise.all(refreshed.slice(0, visibleCount).map(async (record) => ({
-        ...record,
-        cover: archiveFilesAvailable(record)
-          ? await get_static_url("cache", `${record.platform}/${record.room_id}/${record.live_id}/cover.jpg`)
-          : "",
-      })));
-      hasMore = refreshed.length > visibleCount;
-      recent_records = records;
-      offset = recent_records.length;
-    } else {
-      // Initial load, or new recordings after the previous list became empty.
-      hasMore = true;
-      await loadMoreRecords();
-    }
+    const visibleCount = Math.max(recent_records.length, RECORDS_PER_PAGE);
+    const refreshed = await invoke<RecordItem[]>("get_recent_record", {
+      roomId: "",
+      offset: 0,
+      // A new recording can displace an old row even after pagination ended.
+      limit: visibleCount + 1,
+    });
+    const records = await Promise.all(refreshed.slice(0, visibleCount).map(async (record) => ({
+      ...record,
+      cover: archiveFilesAvailable(record)
+        ? await get_static_url("cache", `${record.platform}/${record.room_id}/${record.live_id}/cover.jpg`)
+        : "",
+    })));
+    hasMore = refreshed.length > visibleCount;
+    recent_records = records;
+    offset = recent_records.length;
   }
 
   async function loadMoreRecords() {
@@ -280,7 +276,7 @@
     {#if storageLoading}
       <div role="status" class="flex items-center gap-2 text-[12px] text-fg-muted">
         <Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />
-        正在加载存储元数据，录播记录和统计将自动更新…
+        正在读取存储目录，以下录播记录和统计仅包含本次已加载的部分…
       </div>
     {:else if storageError}
       <div role="alert" class="rounded-[8px] bg-danger-soft p-3 text-[12px] text-danger-fg">{storageError}</div>
@@ -298,7 +294,7 @@
           <div class="min-w-0">
             <p class="text-[12px] text-fg-muted">录播总大小</p>
             <p class="text-[20px] font-semibold leading-tight text-fg tabular-nums">
-              {storageLoading ? "加载中…" : storageError ? "—" : formatSize(disk_usage)}
+              {statsLoaded ? formatSize(disk_usage) : storageError ? "—" : "加载中…"}
             </p>
           </div>
         </div>
@@ -375,7 +371,7 @@
           <div class="min-w-0">
             <p class="text-[12px] text-fg-muted">总缓存时长</p>
             <p class="text-[20px] font-semibold leading-tight text-fg tabular-nums">
-              {storageLoading ? "加载中…" : storageError ? "—" : format_time(total_length)}
+              {statsLoaded ? format_time(total_length) : storageError ? "—" : "加载中…"}
             </p>
           </div>
         </div>
@@ -394,7 +390,7 @@
               今日缓存直播数
             </p>
             <p class="text-[20px] font-semibold leading-tight text-fg tabular-nums">
-              {storageLoading ? "加载中…" : storageError ? "—" : today_record_count}
+              {statsLoaded ? today_record_count : storageError ? "—" : "加载中…"}
             </p>
           </div>
         </div>
@@ -534,7 +530,7 @@
           </div>
         {/if}
 
-        {#if !hasMore && recent_records.length > 0}
+        {#if !storageLoading && !hasMore && recent_records.length > 0}
           <div class="py-4 text-center text-[12px] text-fg-faint">
             没有更多记录了
           </div>

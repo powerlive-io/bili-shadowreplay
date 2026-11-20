@@ -19,6 +19,7 @@ struct JsonOnlyStore {
     inner: InMemory,
     // Fail one selected write, either before or after it reaches storage.
     failure: Mutex<Option<(String, bool)>>,
+    paused_read: Mutex<Option<(String, tokio::sync::oneshot::Receiver<()>)>>,
 }
 impl fmt::Display for JsonOnlyStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -70,6 +71,17 @@ impl ObjectStore for JsonOnlyStore {
     }
     async fn get_opts(&self, path: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
         assert!(opts.if_match.is_none() && opts.if_none_match.is_none());
+        let pause = {
+            let mut slot = self.paused_read.lock().unwrap();
+            if slot.as_ref().is_some_and(|(key, _)| key == path.as_ref()) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, release)) = pause {
+            release.await.unwrap();
+        }
         self.inner.get_opts(path, opts).await
     }
     fn delete_stream(
@@ -107,6 +119,51 @@ fn record() -> CatalogRecord {
         cover: None,
         results: serde_json::Value::Null,
     }
+}
+
+#[tokio::test]
+async fn remote_open_reports_active_rows_before_the_last_json_read_finishes() {
+    let store = Arc::new(JsonOnlyStore::default());
+    let location = CatalogLocation::object_store(store.clone());
+    let writer = location.open_writer(true).await.unwrap();
+    for id in 1..=3 {
+        let mut row = record();
+        row.recording_id = Uuid::from_u128(id);
+        let entry = writer.put(row, None).await.unwrap();
+        if id == 1 {
+            writer
+                .delete(entry.record.recording_id, entry.revision)
+                .await
+                .unwrap();
+        }
+    }
+    writer.close().await.unwrap();
+    let (unblock, release) = tokio::sync::oneshot::channel();
+    *store.paused_read.lock().unwrap() = Some((
+        format!(".bsr/records/{}/recording.json", Uuid::from_u128(3)),
+        release,
+    ));
+    let (tx, mut progress) = tokio::sync::mpsc::unbounded_channel();
+    let open = tokio::spawn(async move {
+        location
+            .open_writer_observed(
+                false,
+                Some(Arc::new(move |_, row| {
+                    tx.send(row.recording_id).unwrap();
+                })),
+            )
+            .await
+    });
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), progress.recv())
+            .await
+            .unwrap(),
+        Some(Uuid::from_u128(2)),
+    );
+    assert!(!open.is_finished());
+    unblock.send(()).unwrap();
+    let writer = open.await.unwrap().unwrap();
+    assert_eq!(writer.list(None, 10).await.unwrap().entries.len(), 2);
 }
 
 #[tokio::test]

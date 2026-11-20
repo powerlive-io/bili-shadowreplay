@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+pub mod preview;
 pub mod projection;
 pub mod runtime;
 

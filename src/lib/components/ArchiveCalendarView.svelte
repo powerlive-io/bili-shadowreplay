@@ -15,7 +15,7 @@
   import { formatTimecode } from "../time-format";
   import ArchiveCover from "./ArchiveCover.svelte";
   import ArchiveStorageBadge from "./ArchiveStorageBadge.svelte";
-  import { archiveFilesAvailable } from "../recording-storage";
+  import { archiveFilesAvailable, archiveStorageLabel } from "../recording-storage";
 
   let {
     archives, rooms = [], compact = false, selectedArchives, recordingKeys,
@@ -193,9 +193,10 @@
         {#each layout.events as event (event.key)}
           {@const key = archiveKey(event.archive)}
           {@const recording = recordingKeys.has(key)}
-          <button type="button" class="calendar-event" class:is-open={selectedKey === key} class:is-selected={selectedArchives.has(event.archive.live_id)} class:is-recording={recording} class:is-unavailable={!archiveFilesAvailable(event.archive)}
+          {@const storageLabel = archiveStorageLabel(event.archive)}
+          <button type="button" class="calendar-event" class:is-open={selectedKey === key} class:is-selected={selectedArchives.has(event.archive.live_id)} class:is-recording={recording} class:is-unavailable={!!storageLabel && !event.archive.storage_initializing}
             style={`top:${laneLayout.offsets[event.lane]}px;height:${eventHeight(event)}px;left:${event.hitLeft}px;width:${event.hitWidth}px`}
-            aria-label={`录播事件：${event.archive.title || "未命名录播"}，${new Date(event.start).toLocaleString()}，时长 ${formatTimecode(event.archive.length, 0)}${recording ? "，录制中" : ""}${archiveFilesAvailable(event.archive) ? "" : "，存储不可用，仅记录"}`}
+            aria-label={`录播事件：${event.archive.title || "未命名录播"}，${new Date(event.start).toLocaleString()}，时长 ${formatTimecode(event.archive.length, 0)}${recording ? "，录制中" : ""}${storageLabel ? `，${storageLabel}` : ""}`}
             aria-haspopup="dialog" aria-expanded={selectedKey === key} data-archive-key={key} data-recording={recording} data-lane={event.lane}
             title={`${event.archive.title || "未命名录播"}\n${event.timingKnown ? `${new Date(event.start).toLocaleString()} — ${new Date(event.end).toLocaleString()}` : `创建于 ${new Date(event.start).toLocaleString()}，录制时间范围未知`}`}
             onclick={(click) => openEvent(event, click.currentTarget)}>
@@ -204,7 +205,7 @@
                 <span class="event-body" class:side-cover={event.width >= 176}>
                   <ArchiveCover src={archiveFilesAvailable(event.archive) ? event.archive.cover : ""} class={event.width >= 176 ? "h-[45px] w-20 shrink-0 rounded-[3px]" : "h-8 w-full shrink-0 rounded-[3px]"} />
                   <span class="min-w-0 flex-1">
-                    <span class="event-title">{archiveFilesAvailable(event.archive) ? "" : "⚠ 仅记录 · "}{event.continuesBefore ? "← " : ""}{event.archive.title || "未命名录播"}{event.continuesAfter ? " →" : ""}</span>
+                    <span class="event-title">{storageLabel ? (event.archive.storage_initializing ? "加载中 · " : "⚠ 仅记录 · ") : ""}{event.continuesBefore ? "← " : ""}{event.archive.title || "未命名录播"}{event.continuesAfter ? " →" : ""}</span>
                     {#if event.width >= 176}<span class="mt-0.5 block truncate text-[10px] leading-3 tabular-nums opacity-80">{eventTime(event)}</span>{/if}
                   </span>
                 </span>

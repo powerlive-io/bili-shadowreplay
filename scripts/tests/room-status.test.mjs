@@ -24,6 +24,7 @@ function fixture(invoke, get = async () => { throw new Error("unexpected image r
   const context = vm.createContext({
     invoke,
     get,
+    getStorageInitializationStatus: async () => ({ loading: false, error: null }),
     pageVisibility: () => () => true,
     URL: {
       createObjectURL: (blob) => { const url = `blob:cover-${++urlId}`; createdUrls.set(url, blob); return url; },
@@ -117,11 +118,34 @@ test("room history passes the full room identity to the shared loader and replac
   await f.context.refreshArchives();
   assert.deepEqual(requests[0], { platform: "bilibili", roomId: "123" });
   assert.equal(f.get("archives.length"), 45);
-  assert.equal(f.get("archivesLoaded"), true);
+  assert.equal(f.get("archiveSnapshot"), "complete");
   rows = [{ live_id: "new recording" }, ...rows.filter((row) => row.live_id !== "40")];
   await f.context.refreshArchives();
   assert.equal(requests.length, 2);
   assert.deepEqual(Array.from(f.get("archives"), (row) => row.live_id), rows.map((row) => row.live_id));
+});
+
+test("room totals stay partial through empty and short preview pages until a ready refresh", async () => {
+  let rows = [];
+  let init = { loading: true, error: null };
+  const f = fixture(async () => rows);
+  f.context.getStorageInitializationStatus = async () => init;
+  await f.context.refreshArchives();
+  assert.equal(f.get("archiveSnapshot"), "partial");
+  rows = records(1);
+  await f.context.refreshArchives();
+  assert.equal(f.get("archives.length"), 1);
+  assert.equal(f.get("archiveSnapshot"), "partial");
+  init = { loading: false, error: "catalog failed" };
+  await f.context.refreshArchives();
+  assert.match(f.get("archivesError"), /catalog failed/);
+  assert.equal(f.get("archiveSnapshot"), "partial");
+  init = { loading: false, error: null };
+  rows = records(3);
+  await f.context.refreshArchives();
+  assert.equal(f.get("archiveSnapshot"), "complete");
+  assert.equal(f.get("archives.length"), 3);
+  assert.equal(f.get("archivesError"), "");
 });
 
 test("record history keeps loaded rows on failure and permits a successful retry", async () => {
@@ -172,6 +196,8 @@ test("closing stops subscriptions and ignores pending status and history respons
   assert.equal(f.subscriptions[0].fallbackMs, 5000);
   const status = f.context.refreshStatus();
   const history = f.context.refreshArchives();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2, "both requests are in flight when the dialog closes");
   cleanup();
   pending[0]({ recorder: room });
   pending[1](records(5));
@@ -179,7 +205,7 @@ test("closing stops subscriptions and ignores pending status and history respons
   assert.ok(f.subscriptions.every(({ stopped }) => stopped));
   assert.equal(f.get("status"), null);
   assert.equal(f.get("archives.length"), 0);
-  assert.equal(f.get("archivesLoaded"), false);
+  assert.equal(f.get("archiveSnapshot"), null);
 });
 
 test("only RTMP rooms fetch ingest credentials in the existing status window", async () => {

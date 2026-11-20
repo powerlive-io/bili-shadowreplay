@@ -27,15 +27,12 @@
       const status = await getStorageInitializationStatus();
       if (disposed) return;
       initializing = status.loading;
-      if (initializing) {
-        loadError = "";
-        return;
-      }
       if (status.error) {
         loadError = `存储元数据加载失败：${status.error}，请重启应用重试。`;
         return;
       }
-      const result = await loadRoomArchives(room.room_info, () => !disposed);
+      const result = await loadRoomArchives(room.room_info, () => !disposed,
+        archives.length ? undefined : records => { archives = records; });
       if (disposed) return;
       archives = result;
       loadError = "";

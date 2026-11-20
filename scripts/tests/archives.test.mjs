@@ -42,6 +42,21 @@ test("room archives load beyond 100 entries and hydrate covers without changing 
   assert.equal(rows[236].cover, null);
 });
 
+test("the first archive page is visible while the next page is still pending", { timeout: 2000 }, async () => {
+  const rows = Array.from({ length: 101 }, (_, index) => record(index));
+  let release;
+  const lastPage = new Promise(resolve => { release = resolve; });
+  const api = await loadModule(async (_command, { offset }) => offset ? lastPage : rows.slice(0, 100));
+  let published;
+  const firstPage = new Promise(resolve => { published = resolve; });
+  const pending = api.loadRoomArchives(room, () => true, published);
+  const preview = await firstPage;
+  assert.equal(preview.length, 100);
+  release(rows.slice(100));
+  assert.equal((await pending).length, 101);
+  assert.equal(preview.length, 100);
+});
+
 test("closing during a page request prevents later requests and cover work", async () => {
   let active = true;
   let calls = 0;

@@ -310,6 +310,9 @@ pub async fn get_room_info(
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_archive_disk_usage(state: state_type!()) -> Result<i64, String> {
+    if state.db.ensure_catalog_startup_complete().is_err() {
+        return Ok(state.db.startup_preview.totals().0);
+    }
     Ok(state.recorder_manager.get_archive_disk_usage().await?)
 }
 
@@ -334,12 +337,27 @@ pub async fn get_archives(
     limit: i64,
     platform: Option<String>,
 ) -> Result<Vec<ArchiveRecord>, String> {
+    if state.db.ensure_catalog_startup_complete().is_err() {
+        return Ok(state
+            .db
+            .startup_preview
+            .page(&room_id, platform.as_deref(), offset, limit)
+            .into_iter()
+            .map(|record| ArchiveRecord {
+                record,
+                recording_started_at: None,
+                recording_ended_at: None,
+            })
+            .collect());
+    }
     let records = if let Some(platform) = platform {
         let platform = PlatformType::from_str(&platform).map_err(|error| error.to_string())?;
         state
             .db
             .get_room_records(platform.as_str(), &room_id, offset, limit)
             .await?
+    } else if room_id.is_empty() {
+        state.db.get_recent_record("", offset, limit).await?
     } else {
         state
             .recorder_manager
@@ -557,6 +575,9 @@ pub async fn send_danmaku(
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_total_length(state: state_type!()) -> Result<f64, String> {
+    if state.db.ensure_catalog_startup_complete().is_err() {
+        return Ok(state.db.startup_preview.totals().1);
+    }
     match state.db.get_total_length().await {
         Ok(total_length) => Ok(total_length),
         Err(e) => Err(format!("Failed to get total length: {e}")),
@@ -565,6 +586,9 @@ pub async fn get_total_length(state: state_type!()) -> Result<f64, String> {
 
 #[cfg_attr(feature = "gui", tauri::command)]
 pub async fn get_today_record_count(state: state_type!()) -> Result<i64, String> {
+    if state.db.ensure_catalog_startup_complete().is_err() {
+        return Ok(state.db.startup_preview.totals().2);
+    }
     match state.db.get_today_record_count().await {
         Ok(count) => Ok(count),
         Err(e) => Err(format!("Failed to get today record count: {e}")),
@@ -578,6 +602,9 @@ pub async fn get_recent_record(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<RecordRow>, String> {
+    if state.db.ensure_catalog_startup_complete().is_err() {
+        return Ok(state.db.startup_preview.page(&room_id, None, offset, limit));
+    }
     match state.db.get_recent_record(&room_id, offset, limit).await {
         Ok(records) => Ok(records),
         Err(e) => Err(format!("Failed to get recent record: {e}")),
