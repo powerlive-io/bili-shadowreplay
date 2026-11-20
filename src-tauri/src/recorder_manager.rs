@@ -220,6 +220,27 @@ pub struct RelatedPlaylist {
 pub type MaterialHook =
     Arc<dyn Fn(String, VideoRow) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
+/// Only the cleanup future owns a strong reference. Returning an error or
+/// cancelling the future releases its claim without acquiring another lock.
+#[derive(Clone, Default)]
+struct RoomRemovals(HashMap<String, std::sync::Weak<()>>);
+
+impl RoomRemovals {
+    fn contains(&self, id: &str) -> bool {
+        self.0.get(id).is_some_and(|owner| owner.strong_count() > 0)
+    }
+
+    fn claim(&mut self, id: &str) -> Option<Arc<()>> {
+        self.0.retain(|_, owner| owner.strong_count() > 0);
+        if self.contains(id) {
+            return None;
+        }
+        let owner = Arc::new(());
+        self.0.insert(id.to_owned(), Arc::downgrade(&owner));
+        Some(owner)
+    }
+}
+
 #[derive(Clone)]
 pub struct RecorderManager {
     #[cfg(not(feature = "headless"))]
@@ -234,7 +255,7 @@ pub struct RecorderManager {
     /// `recorders`. Never wait for `to_remove` while holding a `recorders`
     /// guard; tokio's fair RwLock turns the inversion into a deadlock as soon
     /// as a writer queues on either lock.
-    to_remove: Arc<RwLock<HashSet<String>>>,
+    to_remove: Arc<RwLock<RoomRemovals>>,
     event_tx: RecorderEventSender,
     webhook_poster: WebhookPoster,
     material_hook: Arc<std::sync::OnceLock<MaterialHook>>,
@@ -386,7 +407,7 @@ impl RecorderManager {
             task_manager,
             resource_dir,
             recorders: Arc::new(RwLock::new(HashMap::new())),
-            to_remove: Arc::new(RwLock::new(HashSet::new())),
+            to_remove: Default::default(),
             event_tx,
             webhook_poster,
             material_hook: Arc::new(std::sync::OnceLock::new()),
@@ -1062,22 +1083,41 @@ impl RecorderManager {
     /// neither catalog refresh nor a replacement producer races old updates.
     async fn abort_failed_recording(&self, platform: PlatformType, room_id: &str, live_id: &str) {
         let id = format!("{}:{room_id}", platform.as_str());
-        if !self.to_remove.write().await.insert(id.clone()) {
+        let Some(claim) = self.to_remove.write().await.claim(&id) else {
+            // Both removal paths already stop and drain the producer.
             return;
-        }
-        let manager = self.clone();
-        let live_id = live_id.to_owned();
-        let room_id = room_id.to_owned();
+        };
         // The event consumer must continue draining while stop/barrier wait.
+        drop(self.retire_room(claim, platform, room_id, Some(live_id.to_owned())));
+    }
+
+    /// Stop accepting events from this producer and retire its catalog sessions
+    /// before attempting destructive I/O. Even a disconnected removal request
+    /// must let this worker finish before the monitor can construct a replacement.
+    fn retire_room(
+        &self,
+        claim: Arc<()>,
+        platform: PlatformType,
+        room_id: &str,
+        failed_live: Option<String>,
+    ) -> tokio::task::JoinHandle<Result<bool, RecorderManagerError>> {
+        let manager = self.clone();
+        let id = recorder_catalog_key(platform.as_str(), room_id);
+        let room_id = room_id.to_owned();
         tokio::spawn(async move {
             let recorder = manager.recorders.read().await.get(&id).cloned();
-            if let Some(recorder) = &recorder {
+            let live_id = if let Some(recorder) = &recorder {
                 recorder.stop().await;
-            }
+                Some(recorder.live_id().read().await.clone())
+            } else {
+                None
+            };
             let result = async {
                 // First pass earlier lifecycle events: a slow failing write may
                 // have allowed the producer to queue starts for later attempts.
-                manager.event_tx.drain_recording(&live_id).await?;
+                if let Some(live) = failed_live.or(live_id) {
+                    manager.event_tx.drain_recording(&live).await?;
+                }
                 let lives = manager
                     .db
                     .active_catalog_recordings_for_room(platform.as_str(), &room_id)
@@ -1086,11 +1126,11 @@ impl RecorderManager {
                     manager.event_tx.drain_recording(&live).await?;
                     manager.db.finish_catalog_recording(&live).await?;
                 }
-                Ok::<_, RecorderManagerError>(())
+                Ok::<_, RecorderManagerError>(recorder.is_some())
             }
             .await;
-            if let Err(error) = result {
-                log::error!("Could not retire aborted catalog recordings for {id}: {error}");
+            if let Err(error) = &result {
+                log::error!("Could not retire catalog recordings for {id}: {error}");
             }
             let mut recorders = manager.recorders.write().await;
             if let Some(recorder) = &recorder {
@@ -1101,12 +1141,11 @@ impl RecorderManager {
                     recorders.remove(&id);
                 }
             }
-            // insert_recorder holds to_remove before taking recorders. Never
-            // wait for that lock while retaining the map's write guard.
+            drop(claim);
             drop(recorders);
-            manager.to_remove.write().await.remove(&id);
             manager.db.notify_change(DataChange::Recorders);
-        });
+            result
+        })
     }
 
     /// Remove a recorder from the manager
@@ -1124,29 +1163,27 @@ impl RecorderManager {
         // are not in the live map, but their archives are real and the room
         // list still offers removal.
         let recorder_id = format!("{}:{}", platform.as_str(), room_id);
-        let loaded = self.recorders.read().await.contains_key(&recorder_id);
+        let claim = self
+            .to_remove
+            .write()
+            .await
+            .claim(&recorder_id)
+            .ok_or_else(|| RecorderManagerError::Removing {
+                room_id: room_id.to_owned(),
+            })?;
+        let loaded = self
+            .retire_room(claim.clone(), platform, room_id, None)
+            .await
+            .map_err(std::io::Error::other)??;
         if !loaded && !self.db.has_recorder(platform.as_str(), room_id).await? {
             return Err(RecorderManagerError::NotFound {
                 room_id: room_id.to_string(),
             });
         }
 
-        // add to to_remove before stopping, so a concurrent reload cannot
-        // insert this room again while its files are being deleted.
-        log::debug!("Add to to_remove: {recorder_id}");
-        self.to_remove.write().await.insert(recorder_id.clone());
-
-        // stop recorder
-        log::debug!("Stop recorder: {recorder_id}");
-        // Stop without holding the map's read lock: stop() awaits task shutdown.
-        let recorder_ref = self.recorders.read().await.get(&recorder_id).cloned();
-        if let Some(recorder_ref) = recorder_ref {
-            recorder_ref.stop().await;
-        }
-
-        // Keep the recorder/index available for retry if any backend operation
-        // fails. Historical archives can belong to different providers.
-        let result = async {
+        // The live map no longer contains a stopped producer. If storage fails,
+        // the catalog room remains available for retry and monitor reload.
+        let recorder = {
             let room_stores = self
                 .archive_storage
                 .room_stores(platform.as_str(), room_id)
@@ -1183,16 +1220,8 @@ impl RecorderManager {
                     .forget_recording(platform.as_str(), room_id, &archive.live_id)
                     .await?;
             }
-            Ok::<_, RecorderManagerError>(recorder)
-        }
-        .await;
-        self.to_remove.write().await.remove(&recorder_id);
-        let recorder = result?;
-
-        // remove recorder
-        log::debug!("Remove recorder from manager: {recorder_id}");
-        self.recorders.write().await.remove(&recorder_id);
-        self.db.notify_change(DataChange::Recorders);
+            recorder
+        };
 
         Ok(recorder)
     }
@@ -2827,7 +2856,7 @@ mod archive_storage_tests {
             task_manager: Arc::new(TaskManager::new()),
             resource_dir: dir.into(),
             recorders: Arc::new(RwLock::new(HashMap::new())),
-            to_remove: Arc::new(RwLock::new(HashSet::new())),
+            to_remove: Default::default(),
             event_tx,
             webhook_poster: WebhookPoster::new(crate::webhook::poster::WebhookConfig::default())
                 .unwrap(),
@@ -3340,7 +3369,7 @@ mod archive_storage_tests {
     async fn a_room_being_removed_is_not_loaded_again() {
         let dir = tempfile::tempdir().unwrap();
         let manager = manager(dir.path()).await;
-        manager.to_remove.write().await.insert("douyu:room".into());
+        let _claim = manager.to_remove.write().await.claim("douyu:room").unwrap();
 
         assert!(matches!(
             manager
@@ -3366,7 +3395,7 @@ mod archive_storage_tests {
             .remove_recorder(PlatformType::Douyu, "room")
             .await
             .unwrap();
-        assert!(manager.to_remove.read().await.is_empty());
+        assert!(!manager.to_remove.read().await.contains("douyu:room"));
 
         assert!(matches!(
             manager

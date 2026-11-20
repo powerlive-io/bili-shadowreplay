@@ -339,25 +339,16 @@ pub async fn clip_range(
         &state,
         &event_id,
         async move {
-            match clip_range_inner(&state_clone, &reporter, params).await {
-                Ok(video) => {
-                    reporter.finish(true, "切片完成").await;
-                    let _ = state_clone
-                        .db
-                        .update_task(&task_id, "success", "切片完成", None)
-                        .await;
-                    auto_subtitle_material(&state_clone, &task_id, video.id).await;
-                    Ok(video)
-                }
-                Err(e) => {
-                    reporter.finish(false, &format!("切片失败: {e}")).await;
-                    let _ = state_clone
-                        .db
-                        .update_task(&task_id, "failed", &format!("切片失败: {e}"), None)
-                        .await;
-                    Err(e)
-                }
-            }
+            let result = clip_range_inner(&state_clone, &reporter, params).await;
+            finish_clip_task(
+                &state_clone,
+                &reporter,
+                result.as_ref().err().map(String::as_str),
+            )
+            .await?;
+            let video = result?;
+            auto_subtitle_material(&state_clone, &task_id, video.id).await;
+            Ok(video)
         },
         "切片任务已取消",
         "切片任务失败",
@@ -418,6 +409,32 @@ pub(crate) async fn run_queued<T: Send + 'static>(
     }
 }
 
+async fn finish_clip_task(
+    state: &State,
+    reporter: &ProgressReporter,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let (status, message) = match error {
+        None => ("success", "切片完成".to_string()),
+        Some(error) => ("failed", format!("切片失败: {error}")),
+    };
+    if !state
+        .db
+        .finish_active_task(&reporter.event_id, status, &message)
+        .await?
+    {
+        let task = state.db.get_task(&reporter.event_id).await?;
+        return Err(if task.status == "cancelled" {
+            "切片任务已取消"
+        } else {
+            "切片任务已结束"
+        }
+        .into());
+    }
+    reporter.finish(error.is_none(), &message).await;
+    Ok(())
+}
+
 async fn clip_range_inner(
     state: &State,
     reporter: &ProgressReporter,
@@ -425,7 +442,6 @@ async fn clip_range_inner(
 ) -> Result<VideoRow, String> {
     let video = create_material(state, reporter, &params).await?;
     notify_materials_created(state, &params.room_id, std::slice::from_ref(&video)).await?;
-    reporter.finish(true, "切片完成").await;
     Ok(video)
 }
 
@@ -2460,6 +2476,59 @@ mod queued_subtitle_tests {
                     .is_err(),
                 "cancellation must refresh tasks without publishing failure progress"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn clip_completion_is_persisted_before_its_only_finish_event() {
+        use crate::events::{AppEvent, DataChange};
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture(dir.path(), 1, false).await;
+        for error in [None, Some("cut failed")] {
+            let task = state
+                .db
+                .generate_task("clip_range", "", "{}")
+                .await
+                .unwrap();
+            let reporter = ProgressReporter::new(state.db.clone(), &state.events, &task.id)
+                .await
+                .unwrap();
+            for status in ["pending", "processing"] {
+                state
+                    .db
+                    .update_task(&task.id, status, "", None)
+                    .await
+                    .unwrap();
+                let deletion = crate::handlers::task::delete_task(state.clone(), &task.id).await;
+                assert_eq!(
+                    deletion.unwrap_err(),
+                    crate::database::DatabaseError::TaskNotFinished.to_string()
+                );
+                assert_eq!(state.db.get_task(&task.id).await.unwrap().status, status);
+            }
+            let mut events = state.events.subscribe();
+            finish_clip_task(&state, &reporter, error).await.unwrap();
+            assert!(finish_clip_task(&state, &reporter, error).await.is_err());
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AppEvent::DataChanged(DataChange::Tasks)
+            ));
+            assert!(
+                matches!(events.recv().await.unwrap(), AppEvent::ProgressFinished { id, success, .. } if id == task.id && success == error.is_none())
+            );
+            assert_eq!(
+                state.db.get_task(&task.id).await.unwrap().status,
+                if error.is_none() { "success" } else { "failed" }
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), events.recv())
+                    .await
+                    .is_err()
+            );
+            crate::handlers::task::delete_task(state.clone(), &task.id)
+                .await
+                .unwrap();
+            assert!(state.db.get_task(&task.id).await.is_err());
         }
     }
 

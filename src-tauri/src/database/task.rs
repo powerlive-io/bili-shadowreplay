@@ -73,14 +73,24 @@ impl Database {
         message: &str,
         metadata: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        self.update_task_inner(id, status, message, metadata)
+        self.update_task_inner(id, status, message, metadata, status == "cancelled")
             .await?;
         Ok(())
     }
 
     /// Atomically claim cancellation only while a task is pending or processing.
     pub async fn cancel_task_if_active(&self, id: &str) -> Result<bool, DatabaseError> {
-        self.update_task_inner(id, "cancelled", "任务取消", None)
+        self.finish_active_task(id, "cancelled", "任务取消").await
+    }
+
+    /// Only the caller that commits the terminal transition may announce it.
+    pub async fn finish_active_task(
+        &self,
+        id: &str,
+        status: &str,
+        message: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.update_task_inner(id, status, message, None, true)
             .await
     }
 
@@ -90,25 +100,19 @@ impl Database {
         status: &str,
         message: &str,
         metadata: Option<&str>,
+        active_only: bool,
     ) -> Result<bool, DatabaseError> {
-        let result = if let Some(metadata) = metadata {
-            sqlx::query(
-                "UPDATE tasks SET status = $1, message = $2, metadata = $3 WHERE id = $4 AND status != 'cancelled' AND ($1 != 'cancelled' OR status IN ('pending', 'processing'))",
-            )
-            .bind(status)
-            .bind(message)
-            .bind(metadata)
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-        } else {
-            sqlx::query("UPDATE tasks SET status = $1, message = $2 WHERE id = $3 AND status != 'cancelled' AND ($1 != 'cancelled' OR status IN ('pending', 'processing'))")
-                .bind(status)
-                .bind(message)
-                .bind(id)
-                .execute(&self.pool)
-                .await?
-        };
+        let result = sqlx::query(
+            "UPDATE tasks SET status = $1, message = $2, metadata = COALESCE($3, metadata)
+             WHERE id = $4 AND status != 'cancelled' AND (NOT $5 OR status IN ('pending', 'processing'))",
+        )
+        .bind(status)
+        .bind(message)
+        .bind(metadata)
+        .bind(id)
+        .bind(active_only)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Ok(false);
         }
@@ -122,11 +126,24 @@ impl Database {
     }
 
     pub async fn delete_task(&self, id: &str) -> Result<(), DatabaseError> {
-        let _ = sqlx::query("DELETE FROM tasks WHERE id = $1")
+        // Deleting history is not cancellation. Keep the worker's row until its
+        // terminal transition commits, regardless of which client requests deletion.
+        let removed = sqlx::query(
+            "DELETE FROM tasks WHERE id = $1
+             AND lower(status) IN ('success', 'completed', 'failed', 'error', 'cancelled')",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if removed.rows_affected() > 0 {
+            self.notify_change(DataChange::Tasks);
+        } else if sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = $1)")
             .bind(id)
-            .execute(&self.pool)
-            .await?;
-        self.notify_change(DataChange::Tasks);
+            .fetch_one(&self.pool)
+            .await?
+        {
+            return Err(DatabaseError::TaskNotFinished);
+        }
         Ok(())
     }
 

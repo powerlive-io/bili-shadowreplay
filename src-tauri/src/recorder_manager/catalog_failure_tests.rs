@@ -47,7 +47,7 @@ async fn manager(dir: &Path) -> (RecorderManager, RecorderEventReceiver) {
             task_manager: Arc::new(TaskManager::new()),
             resource_dir: dir.into(),
             recorders: Arc::new(RwLock::new(HashMap::new())),
-            to_remove: Arc::new(RwLock::new(HashSet::new())),
+            to_remove: Default::default(),
             webhook_poster: WebhookPoster::new(crate::webhook::poster::WebhookConfig::default())
                 .unwrap(),
             material_hook: Arc::new(std::sync::OnceLock::new()),
@@ -83,7 +83,7 @@ impl Drop for Stopped {
 }
 
 #[tokio::test]
-async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker() {
+async fn competing_removal_cannot_release_an_aborted_recordings_claim() {
     let directory = tempfile::tempdir().unwrap();
     let (manager, rx) = manager(directory.path()).await;
     let consumer = manager.clone();
@@ -94,6 +94,12 @@ async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker
     manager
         .abort_failed_recording(PlatformType::BiliBili, "room", "failed")
         .await;
+    assert!(matches!(
+        manager
+            .remove_recorder(PlatformType::BiliBili, "room")
+            .await,
+        Err(RecorderManagerError::Removing { .. })
+    ));
     // This is the guard insert_recorder retains while waiting to insert.
     let removing = manager.to_remove.read().await;
     assert!(removing.contains("bilibili:room"));
@@ -107,8 +113,7 @@ async fn failed_recording_cleanup_releases_map_before_waiting_for_removal_marker
     .unwrap();
     drop(map_reader);
 
-    // Cleanup gets the map first. It must release it even while our insertion
-    // guard prevents removal-marker cleanup; otherwise this is a lock cycle.
+    // Cleanup must release its claim even with an insertion guard held.
     let map_writer = tokio::time::timeout(Duration::from_secs(5), manager.recorders.write())
         .await
         .expect("failed-recording cleanup must not deadlock recorder insertion");
@@ -456,9 +461,19 @@ async fn record_end_preserves_native_media_when_progress_stat_fails() {
 
 #[tokio::test]
 async fn failed_catalog_update_retires_aborted_attempts_and_reconnects_without_restart() {
-    for next_attempt_queued in [false, true] {
+    for (next_attempt_queued, manual_first, disconnect) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let (manager, rx) = manager(directory.path()).await;
+        manager
+            .db
+            .add_recorder_with_storage(PlatformType::BiliBili, "room", "", Some("default"))
+            .await
+            .unwrap();
         create(&manager, PlatformType::BiliBili, "default", "failed").await;
         create(&manager, PlatformType::Twitch, "other", "unrelated").await;
         if next_attempt_queued {
@@ -543,8 +558,51 @@ async fn failed_catalog_update_retires_aborted_attempts_and_reconnects_without_r
                 .await
                 .unwrap();
         }
+        // Hold stop() mid-flight. Process the failed writes only after manual
+        // removal owns the claim, including when its HTTP caller goes away.
+        let record_task = recorder.record_task();
+        let stop_gate = record_task.lock().await;
+        let removal = if manual_first {
+            let removing = manager.clone();
+            let request = tokio::spawn(async move {
+                removing
+                    .remove_recorder(PlatformType::BiliBili, "room")
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !recorder.quit().load(Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            Some(request)
+        } else {
+            None
+        };
         let consumer = manager.clone();
         let events = tokio::spawn(async move { consumer.handle_events(rx).await });
+        if let Some(request) = removal {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.event_tx.drain_recording("failed"),
+            )
+            .await
+            .expect("cleanup must not block the event consumer")
+            .unwrap();
+            if disconnect {
+                request.abort();
+                assert!(request.await.unwrap_err().is_cancelled());
+                assert!(manager.to_remove.read().await.contains("bilibili:room"));
+                drop(stop_gate);
+            } else {
+                drop(stop_gate);
+                let err = request.await.unwrap().unwrap_err();
+                assert!(err.to_string().contains("不能修改录播资产"), "{err}");
+            }
+        } else {
+            drop(stop_gate);
+        }
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if !manager.recorders.read().await.contains_key("bilibili:room")
@@ -584,6 +642,7 @@ async fn failed_catalog_update_retires_aborted_attempts_and_reconnects_without_r
             .refresh_catalogs(true)
             .await
             .unwrap();
+        assert!(manager.db.has_recorder("bilibili", "room").await.unwrap());
         assert!(
             manager
                 .db
