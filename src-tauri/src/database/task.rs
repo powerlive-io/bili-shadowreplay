@@ -126,11 +126,24 @@ impl Database {
     }
 
     pub async fn delete_task(&self, id: &str) -> Result<(), DatabaseError> {
-        let _ = sqlx::query("DELETE FROM tasks WHERE id = $1")
+        // Deleting history is not cancellation. Keep the worker's row until its
+        // terminal transition commits, regardless of which client requests deletion.
+        let removed = sqlx::query(
+            "DELETE FROM tasks WHERE id = $1
+             AND lower(status) IN ('success', 'completed', 'failed', 'error', 'cancelled')",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if removed.rows_affected() > 0 {
+            self.notify_change(DataChange::Tasks);
+        } else if sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = $1)")
             .bind(id)
-            .execute(&self.pool)
-            .await?;
-        self.notify_change(DataChange::Tasks);
+            .fetch_one(&self.pool)
+            .await?
+        {
+            return Err(DatabaseError::TaskNotFinished);
+        }
         Ok(())
     }
 

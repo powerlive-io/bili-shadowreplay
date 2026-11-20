@@ -2493,6 +2493,19 @@ mod queued_subtitle_tests {
             let reporter = ProgressReporter::new(state.db.clone(), &state.events, &task.id)
                 .await
                 .unwrap();
+            for status in ["pending", "processing"] {
+                state
+                    .db
+                    .update_task(&task.id, status, "", None)
+                    .await
+                    .unwrap();
+                let deletion = crate::handlers::task::delete_task(state.clone(), &task.id).await;
+                assert_eq!(
+                    deletion.unwrap_err(),
+                    crate::database::DatabaseError::TaskNotFinished.to_string()
+                );
+                assert_eq!(state.db.get_task(&task.id).await.unwrap().status, status);
+            }
             let mut events = state.events.subscribe();
             finish_clip_task(&state, &reporter, error).await.unwrap();
             assert!(finish_clip_task(&state, &reporter, error).await.is_err());
@@ -2512,6 +2525,10 @@ mod queued_subtitle_tests {
                     .await
                     .is_err()
             );
+            crate::handlers::task::delete_task(state.clone(), &task.id)
+                .await
+                .unwrap();
+            assert!(state.db.get_task(&task.id).await.is_err());
         }
     }
 

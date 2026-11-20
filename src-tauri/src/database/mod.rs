@@ -39,6 +39,8 @@ pub enum DatabaseError {
     Insert,
     #[error("Entry not found")]
     NotFound,
+    #[error("任务尚未结束，无法删除；请先取消任务或等待完成")]
+    TaskNotFinished,
     #[error("Cookies are invalid")]
     InvalidCookies,
     #[error("Number exceed i64 range")]
