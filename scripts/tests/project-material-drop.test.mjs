@@ -20,6 +20,25 @@ const editorCode = await handlers("../../src/lib/components/project/ProjectEdito
 const timelineCode = await handlers("../../src/lib/components/project/ProjectTimeline.svelte", ["dragOver", "drop"]);
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
+test("editing new overlay text replaces the audio selection; clearing another track preserves it", async () => {
+  const code = await handlers("../../src/lib/components/project/ProjectEditor.svelte", [
+    "select", "selectAudio", "selectOverlay", "startEditing",
+  ]);
+  const state = {
+    selection: null, editingOverlayId: null, overlayEditTimer: null, overlayEditBefore: null,
+    timeline: {}, player: null, editContent: "", editSelectAll: false,
+    finishEditing() {}, findOverlay: () => ({ kind: "text", element: { content: "text" } }),
+    placeOverlays: () => [],
+  };
+  vm.runInContext(code, vm.createContext(state));
+  state.selectAudio("sound");
+  assert.deepEqual(plain(state.selection), { kind: "audio", id: "sound" });
+  state.startEditing("caption", true);
+  state.selectAudio(null);
+  assert.deepEqual(plain(state.selection), { kind: "overlay", id: "caption" });
+  assert.equal(state.editingOverlayId, "caption");
+});
+
 function editor() {
   const additions = [], overlays = [];
   const state = {

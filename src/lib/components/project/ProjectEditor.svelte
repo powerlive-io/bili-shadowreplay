@@ -196,10 +196,12 @@
   let zoom = $state(1);
   let volume = $state(1);
   let muted = $state(false);
-  let selectedClipId: string | null = $state(null);
-  let selectedSubtitleId: string | null = $state(null);
-  let selectedOverlayId: string | null = $state(null);
-  let selectedAudioId: string | null = $state(null);
+  type SelectionKind = "clip" | "subtitle" | "overlay" | "audio";
+  let selection: { kind: SelectionKind; id: string } | null = $state(null);
+  let selectedClipId = $derived(selection?.kind === "clip" ? selection.id : null);
+  let selectedSubtitleId = $derived(selection?.kind === "subtitle" ? selection.id : null);
+  let selectedOverlayId = $derived(selection?.kind === "overlay" ? selection.id : null);
+  let selectedAudioId = $derived(selection?.kind === "audio" ? selection.id : null);
   let editingOverlayId: string | null = $state(null);
   let editSelectAll = $state(false);
   // What the edited text reads now, applied when editing ends.
@@ -841,17 +843,15 @@
     selectClip(added?.id ?? null);
   }
 
-  /**
-   * Select a clip of the main track, and nothing else: the inspector then
-   * shows the clip, and Delete must not act on a subtitle hidden behind it.
-   */
+  /** Track-specific deselection must not clear another track's selection. */
+  function select(kind: SelectionKind, id: string | null) {
+    if (id === null && selection?.kind !== kind) return;
+    if (editingOverlayId && !(kind === "overlay" && editingOverlayId === id)) finishEditing();
+    selection = id === null ? null : { kind, id };
+  }
+
   function selectClip(id: string | null) {
-    selectedClipId = id;
-    if (id) {
-      selectOverlay(null);
-      selectedAudioId = null;
-      selectedSubtitleId = null;
-    }
+    select("clip", id);
   }
 
   /** Split the selected overlay or sound at the playhead, or else the clip there. */
@@ -883,13 +883,13 @@
       deleteOverlay(selectedOverlayId);
     } else if (selectedAudioId) {
       commit(removeAudio(timeline, selectedAudioId));
-      selectedAudioId = null;
+      selection = null;
     } else if (selectedSubtitleId) {
       commit(removeSubtitle(timeline, selectedSubtitleId));
-      selectedSubtitleId = null;
+      selection = null;
     } else if (selectedClipId) {
       commit(removeClip(timeline, selectedClipId));
-      selectedClipId = null;
+      selection = null;
     }
   }
 
@@ -906,13 +906,7 @@
   // ---- Overlays ------------------------------------------------------------
 
   function selectOverlay(id: string | null) {
-    if (editingOverlayId && editingOverlayId !== id) finishEditing();
-    selectedOverlayId = id;
-    if (id) {
-      selectedClipId = null;
-      selectedSubtitleId = null;
-      selectedAudioId = null;
-    }
+    select("overlay", id);
   }
 
   /** Close a run of overlay changes as one undo step. */
@@ -955,7 +949,7 @@
   function deleteOverlay(id: string) {
     if (editingOverlayId === id) editingOverlayId = null;
     commit(removeOverlay(timeline, id));
-    if (selectedOverlayId === id) selectedOverlayId = null;
+    if (selectedOverlayId === id) selection = null;
   }
 
   /** Where an overlay added now starts: at the playhead, over the main track. */
@@ -1187,9 +1181,7 @@
     player?.pause();
     if (overlayEditTimer) settleOverlayEdit();
     overlayEditBefore ??= timeline;
-    selectedOverlayId = id;
-    selectedClipId = null;
-    selectedSubtitleId = null;
+    selectOverlay(id);
     editContent = item.element.content;
     editSelectAll = selectAll;
     editingOverlayId = id;
@@ -1222,7 +1214,7 @@
     const next = content.trim()
       ? editOverlay(timeline, id, withElement({ content }))
       : removeOverlay(timeline, id);
-    if (!content.trim() && selectedOverlayId === id) selectedOverlayId = null;
+    if (!content.trim() && selectedOverlayId === id) selection = null;
     commit(next, before);
   }
 
@@ -1249,13 +1241,7 @@
   // ---- Audio ---------------------------------------------------------------
 
   function selectAudio(id: string | null) {
-    if (id && editingOverlayId) finishEditing();
-    selectedAudioId = id;
-    if (id) {
-      selectedClipId = null;
-      selectedSubtitleId = null;
-      selectedOverlayId = null;
-    }
+    select("audio", id);
   }
 
   /** Change a sound; changes in quick succession make one undo step. */
@@ -1346,10 +1332,7 @@
   // ---- Subtitles -----------------------------------------------------------
 
   function selectSubtitle(id: string, seekTo = false) {
-    selectedSubtitleId = id;
-    selectedClipId = null;
-    selectedOverlayId = null;
-    selectedAudioId = null;
+    select("subtitle", id);
     const item = subtitles.find((entry) => entry.subtitle.id === id);
     if (seekTo && item) seek(item.start);
     tick().then(() =>
@@ -1449,7 +1432,7 @@
     // Tauri's dialog plugin makes confirm() asynchronous.
     if (!(await confirm("确定清空切片中的所有字幕吗？可以撤销。"))) return;
     commit({ ...timeline, subtitles: [] });
-    selectedSubtitleId = null;
+    select("subtitle", null);
   }
 
   async function openAiModal() {
@@ -1844,7 +1827,7 @@
     }
     if (event.key === "Escape" && selectedClipId) {
       event.preventDefault();
-      selectedClipId = null;
+      selectClip(null);
       return;
     }
     if (event.repeat && !event.code.startsWith("Arrow")) return;
@@ -2287,7 +2270,7 @@
         <button
           class="icon-button"
           title="删除选中 (Delete)"
-          disabled={!selectedClipId && !selectedSubtitleId && !selectedOverlayId && !selectedAudioId}
+          disabled={!selection}
           onclick={deleteSelection}
         >
           <Trash2 class="h-4 w-4" />
@@ -2343,7 +2326,7 @@
       onSelectClip={selectClip}
       onSelectSubtitle={(id) => {
         if (id) selectSubtitle(id);
-        else selectedSubtitleId = null;
+        else select("subtitle", null);
       }}
       onSelectOverlay={selectOverlay}
       onSelectAudio={selectAudio}
