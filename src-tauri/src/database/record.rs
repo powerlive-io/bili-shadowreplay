@@ -274,7 +274,7 @@ impl Database {
         self.ensure_storage_schema().await?;
         if room_id.is_empty() {
             Ok(sqlx::query_as::<_, RecordRow>(
-                "SELECT * FROM recording_records ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                "SELECT * FROM recording_records ORDER BY created_at DESC, live_id ASC LIMIT $1 OFFSET $2",
             )
             .bind(limit)
             .bind(offset)

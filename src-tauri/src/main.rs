@@ -1151,6 +1151,7 @@ async fn initialize_app_catalogs(state: State) {
         }
     }
     // Also emit on failure or an empty catalog, so every loading view settles.
+    db.startup_preview.clear();
     db.notify_change(events::DataChange::Records);
 }
 

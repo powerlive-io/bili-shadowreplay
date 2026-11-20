@@ -24,21 +24,19 @@
       const status = await getStorageInitializationStatus();
       if (disposed) return;
       initializing = status.loading;
-      if (initializing) {
-        loadError = "";
-        return;
-      }
       if (status.error) {
         loadError = `存储元数据加载失败：${status.error}，请重启应用重试。`;
         return;
       }
       const recorders = await invoke<RecorderList>("get_recorder_list");
-      const snapshots = await Promise.all(recorders.recorders.map((room) =>
-        loadRoomArchives(room.room_info, () => !disposed)));
       if (disposed) return;
-      archives = snapshots.flat();
       rooms = recorders.recorders;
       loadError = "";
+      // A mounted catalog may contain rooms never configured on this machine.
+      // The recorder list labels filters; it must not determine which rows exist.
+      const records = await loadRoomArchives(null, () => !disposed,
+        archives.length ? undefined : rows => { archives = rows; });
+      if (!disposed) archives = records;
     } catch (error) {
       if (!disposed) loadError = `录播记录加载失败：${String(error)}`;
     } finally {

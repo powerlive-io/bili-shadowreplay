@@ -374,7 +374,7 @@
               {#each roomOptions as option}<option value={option.key}>{option.label}</option>{/each}
             </select>
           {/if}
-          <span class="whitespace-nowrap text-[11px] text-fg-muted">共 <span class="tabular-nums">{filtered.length}</span> 条</span>
+          <span class="whitespace-nowrap text-[11px] text-fg-muted">{loading ? "已加载" : "共"} <span class="tabular-nums">{filtered.length}</span> 条</span>
           {#if $archiveViewMode === "list"}<label class="flex items-center gap-1.5 text-[11px] text-fg-muted">
             每页
             <select class="ui-input h-6 min-w-[56px] rounded-[6px] py-0 pl-2 text-[11px]" aria-label="每页录播数" bind:value={pageSize} onchange={changePageSize}>
@@ -412,7 +412,7 @@
     {/if}
 
     <div class="ui-card overflow-hidden" class:flex={$archiveViewMode === "calendar"} class:flex-col={$archiveViewMode === "calendar"} class:min-h-0={$archiveViewMode === "calendar"}>
-      {#if loading && archives.length === 0}
+      {#if loading && filtered.length === 0}
         <div role="status" class="flex items-center justify-center gap-2 p-10 text-[12px] text-fg-muted"><Loader2 class="h-4 w-4 animate-spin motion-reduce:animate-none" />正在加载录播记录…</div>
       {:else if filteredArchives.length === 0}
         <div class="flex flex-col items-center justify-center gap-2 p-10 text-[12px] text-fg-muted">

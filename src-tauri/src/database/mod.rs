@@ -30,6 +30,7 @@ pub struct Database {
     pub(crate) catalogs: std::sync::OnceLock<std::sync::Arc<catalog::runtime::CatalogRuntime>>,
     pub(crate) catalog_startup_blocked: std::sync::atomic::AtomicBool,
     pub(crate) catalog_startup_error: std::sync::RwLock<Option<String>>,
+    pub(crate) startup_preview: catalog::preview::StartupPreview,
 }
 
 #[derive(Error, Debug)]
@@ -107,6 +108,7 @@ impl Database {
             catalogs: std::sync::OnceLock::new(),
             catalog_startup_blocked: std::sync::atomic::AtomicBool::new(false),
             catalog_startup_error: std::sync::RwLock::new(None),
+            startup_preview: Default::default(),
         }
     }
 }

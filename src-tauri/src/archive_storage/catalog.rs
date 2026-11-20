@@ -239,6 +239,7 @@ impl ArchiveStorage {
         let _configuration = tokio::sync::RwLockWriteGuard::downgrade(gate);
         let results = futures::future::join_all(reconnect.into_iter().map(|id| async move {
             if let Err(error) = self.attach_catalog(id).await {
+                self.db.startup_preview.discard(id);
                 self.db
                     .catalog_failed(id, &error.to_string())
                     .await
@@ -281,12 +282,33 @@ impl ArchiveStorage {
             tokio::fs::create_dir_all(&definition.root).await?;
         }
         let location = self.catalog_location(id).await?;
+        // Observe the actual remote JSON reads, not the later scan over the
+        // writer's fully populated in-memory catalog. Never expose a replaced root.
+        let observer = (cfg!(feature = "gui")
+            && self.db.ensure_catalog_startup_complete().is_err())
+        .then(|| {
+            let db = self.db.clone();
+            let alias = id.to_owned();
+            let expected = expected.clone();
+            Arc::new(
+                move |uuid: uuid::Uuid, record: &recording_catalog::CatalogRecord| {
+                    if expected.as_ref().is_none_or(|id| *id == uuid.to_string()) {
+                        db.startup_preview.observe(&alias, record);
+                        db.notify_coalesced_change(crate::events::DataChange::Records);
+                    }
+                },
+            ) as recording_catalog::ScanObserver
+        });
         let (writer, reader) = if readonly {
             (None, Some(Arc::new(location.open_reader().await?)))
         } else {
-            match location.open_writer(expected.is_none()).await {
+            match location
+                .open_writer_observed(expected.is_none(), observer.clone())
+                .await
+            {
                 Ok(writer) => (Some(writer), None),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock && !needs_import => {
+                    self.db.startup_preview.discard(id);
                     (None, Some(Arc::new(location.open_reader().await?)))
                 }
                 Err(error) => return Err(error),
@@ -341,7 +363,13 @@ impl ArchiveStorage {
                 .map_err(database_error)?;
             let scan = match &writer {
                 Some(writer) => writer.scan().await?,
-                None => reader.as_ref().expect("reader").scan().await?,
+                None => {
+                    reader
+                        .as_ref()
+                        .expect("reader")
+                        .scan_observed(observer.as_ref())
+                        .await?
+                }
             };
             self.db
                 .rebuild_catalog_projection(mount, scan)

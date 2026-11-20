@@ -25,7 +25,7 @@ await refreshModule.evaluate();
 
 async function handlers(path, state) {
   state = {
-    storageLoading: false, storageError: "",
+    storageLoading: false, storageError: "", statsLoaded: false, RECORDS_PER_PAGE: 5,
     createStateRefresh: refreshModule.namespace.createStateRefresh,
     getStorageInitializationStatus: async () => ({ loading: false, error: null }),
     ...state,
@@ -216,7 +216,7 @@ test("dashboard refresh reopens exhausted pagination when new rows displace old 
   const state = await handlers("page/Summary.svelte", {
     summary: {}, total: 0, online: 0, disk_usage: 0, account_count: 0,
     total_length: 0, today_record_count: 0, offset: 2, hasMore: false,
-    hasNewRecords: false, loading: false, RECORDS_PER_PAGE: 5,
+    hasNewRecords: false, loading: false, RECORDS_PER_PAGE: 2,
     recent_records: [row("latest"), row("old")],
     get_static_url: async () => "/cover",
     invoke: async (command, args) => {
@@ -241,7 +241,7 @@ test("dashboard refresh reopens exhausted pagination when new rows displace old 
   assert.equal(state.recent_records[0].live_id, "after-empty");
 });
 
-test("dashboard leaves recording sections loading while local room/account data is available", async () => {
+test("dashboard shows the current partial scan and stats, then refreshes after cutover", async () => {
   const requests = [];
   let initializing = true;
   const state = await handlers("page/Summary.svelte", {
@@ -254,7 +254,7 @@ test("dashboard leaves recording sections loading while local room/account data 
       requests.push(command);
       if (command === "get_recorder_list") return { count: 2, recorders: [{ room_info: { status: true } }] };
       if (command === "get_account_count") return 3;
-      if (command === "get_recent_record") return [row("ready")];
+      if (command === "get_recent_record") return initializing ? [row("from-remote", false)] : [row("ready")];
       return 60;
     },
   });
@@ -263,7 +263,11 @@ test("dashboard leaves recording sections loading while local room/account data 
   assert.equal(state.storageLoading, true);
   assert.equal(state.total, 2);
   assert.equal(state.account_count, 3);
-  assert.deepEqual(requests, ["get_recorder_list", "get_account_count"]);
+  assert.equal(state.statsLoaded, true);
+  assert.equal(state.disk_usage, 60);
+  assert.deepEqual(plain(state.recent_records.map(item => item.live_id)), ["from-remote"]);
+  assert.equal(state.recent_records[0].cover, "");
+  assert.equal(requests.filter(command => command === "get_recent_record").length, 1);
 
   initializing = false;
   await state.update_summary();
@@ -293,7 +297,7 @@ for (const failure of ["get_archive_disk_usage", "get_recent_record", "cover"]) 
     let reads = 0;
     const previous = [row("previous")];
     const state = await handlers("page/Summary.svelte", {
-      summary: {}, total: 0, online: 0, disk_usage: 0, account_count: 0,
+      RECORDS_PER_PAGE: 1, summary: {}, total: 0, online: 0, disk_usage: 0, account_count: 0,
       total_length: 0, today_record_count: 0, offset: 1, hasMore: false,
       recent_records: previous,
       invoke: async command => {
@@ -327,32 +331,31 @@ for (const failure of ["get_archive_disk_usage", "get_recent_record", "cover"]) 
   });
 }
 
-test("manual dashboard refresh retains records while initialization is pending or failed", async () => {
-  for (const status of [{ loading: true, error: null }, { loading: false, error: "startup failed" }]) {
-    const previous = [row("previous")];
-    const state = await handlers("page/Summary.svelte", {
-      recent_records: previous, offset: 1, hasMore: false,
-      getStorageInitializationStatus: async () => status,
-      invoke: async command => {
-        if (command === "get_recorder_list") return { count: 0, recorders: [] };
-        assert.equal(command, "get_account_count", "pending or failed startup must not read recording data");
-        return 0;
-      },
-    });
-    await state.refreshRecords();
-    assert.equal(state.recent_records, previous);
-    assert.equal(state.offset, 1);
-    assert.equal(state.hasMore, false);
-    assert.equal(state.storageLoading, status.loading);
-    if (status.error) assert.match(state.storageError, /startup failed/);
-  }
+test("manual dashboard refresh retains records when initialization fails", async () => {
+  const status = { loading: false, error: "startup failed" };
+  const previous = [row("previous")];
+  const state = await handlers("page/Summary.svelte", {
+    recent_records: previous, offset: 1, hasMore: false,
+    getStorageInitializationStatus: async () => status,
+    invoke: async command => {
+      if (command === "get_recorder_list") return { count: 0, recorders: [] };
+      assert.equal(command, "get_account_count", "failed startup must not read recording data");
+      return 0;
+    },
+  });
+  await state.refreshRecords();
+  assert.equal(state.recent_records, previous);
+  assert.equal(state.offset, 1);
+  assert.equal(state.hasMore, false);
+  assert.equal(state.storageLoading, status.loading);
+  assert.match(state.storageError, /startup failed/);
 });
 
 for (const [path, refresh] of [
   ["page/Archive.svelte", "fetchArchives"],
   ["lib/components/RoomArchiveModal.svelte", "refreshArchives"],
 ]) {
-  test(`${path} waits for initialization, refreshes when ready, and settles errors`, async () => {
+  test(`${path} shows remote scan progress during initialization, refreshes when ready, and settles errors`, { timeout: 2000 }, async () => {
     let status = { loading: true, error: null };
     let archiveReads = 0;
     let release;
@@ -360,16 +363,17 @@ for (const [path, refresh] of [
       loading: true, loadError: "", disposed: false, archives: [], rooms: [],
       room: { room_info: { platform: "bilibili", room_id: "room" } },
       getStorageInitializationStatus: async () => status,
-      invoke: async () => ({ recorders: [{ room_info: {} }] }),
+      invoke: async () => ({ recorders: [] }),
       loadRoomArchives: async () => {
         archiveReads++;
+        if (status.loading) return [row("from-remote", false)];
         return await new Promise(resolve => { release = resolve; });
       },
     });
     await state[refresh]();
     assert.equal(state.loading, true, "loading must outlive the fast local status request");
-    assert.equal(archiveReads, 0);
-    assert.equal(state.archives.length, 0);
+    assert.equal(archiveReads, 1);
+    assert.equal(state.archives[0].live_id, "from-remote");
 
     status = { loading: false, error: null };
     const pending = state[refresh]();
@@ -384,7 +388,7 @@ for (const [path, refresh] of [
     await state[refresh]();
     assert.equal(state.loading, false);
     assert.match(state.loadError, /catalog unavailable/);
-    assert.equal(archiveReads, 1);
+    assert.equal(archiveReads, 2);
 
     state.getStorageInitializationStatus = async () => { throw new Error("connection lost"); };
     await state[refresh]();
