@@ -1084,21 +1084,40 @@ impl RecorderManager {
     async fn abort_failed_recording(&self, platform: PlatformType, room_id: &str, live_id: &str) {
         let id = format!("{}:{room_id}", platform.as_str());
         let Some(claim) = self.to_remove.write().await.claim(&id) else {
+            // Both removal paths already stop and drain the producer.
             return;
         };
-        let manager = self.clone();
-        let live_id = live_id.to_owned();
-        let room_id = room_id.to_owned();
         // The event consumer must continue draining while stop/barrier wait.
+        drop(self.retire_room(claim, platform, room_id, Some(live_id.to_owned())));
+    }
+
+    /// Stop accepting events from this producer and retire its catalog sessions
+    /// before attempting destructive I/O. Even a disconnected removal request
+    /// must let this worker finish before the monitor can construct a replacement.
+    fn retire_room(
+        &self,
+        claim: Arc<()>,
+        platform: PlatformType,
+        room_id: &str,
+        failed_live: Option<String>,
+    ) -> tokio::task::JoinHandle<Result<bool, RecorderManagerError>> {
+        let manager = self.clone();
+        let id = recorder_catalog_key(platform.as_str(), room_id);
+        let room_id = room_id.to_owned();
         tokio::spawn(async move {
             let recorder = manager.recorders.read().await.get(&id).cloned();
-            if let Some(recorder) = &recorder {
+            let live_id = if let Some(recorder) = &recorder {
                 recorder.stop().await;
-            }
+                Some(recorder.live_id().read().await.clone())
+            } else {
+                None
+            };
             let result = async {
                 // First pass earlier lifecycle events: a slow failing write may
                 // have allowed the producer to queue starts for later attempts.
-                manager.event_tx.drain_recording(&live_id).await?;
+                if let Some(live) = failed_live.or(live_id) {
+                    manager.event_tx.drain_recording(&live).await?;
+                }
                 let lives = manager
                     .db
                     .active_catalog_recordings_for_room(platform.as_str(), &room_id)
@@ -1107,11 +1126,11 @@ impl RecorderManager {
                     manager.event_tx.drain_recording(&live).await?;
                     manager.db.finish_catalog_recording(&live).await?;
                 }
-                Ok::<_, RecorderManagerError>(())
+                Ok::<_, RecorderManagerError>(recorder.is_some())
             }
             .await;
-            if let Err(error) = result {
-                log::error!("Could not retire aborted catalog recordings for {id}: {error}");
+            if let Err(error) = &result {
+                log::error!("Could not retire catalog recordings for {id}: {error}");
             }
             let mut recorders = manager.recorders.write().await;
             if let Some(recorder) = &recorder {
@@ -1125,7 +1144,8 @@ impl RecorderManager {
             drop(claim);
             drop(recorders);
             manager.db.notify_change(DataChange::Recorders);
-        });
+            result
+        })
     }
 
     /// Remove a recorder from the manager
@@ -1143,7 +1163,7 @@ impl RecorderManager {
         // are not in the live map, but their archives are real and the room
         // list still offers removal.
         let recorder_id = format!("{}:{}", platform.as_str(), room_id);
-        let _claim = self
+        let claim = self
             .to_remove
             .write()
             .await
@@ -1151,21 +1171,18 @@ impl RecorderManager {
             .ok_or_else(|| RecorderManagerError::Removing {
                 room_id: room_id.to_owned(),
             })?;
-        let recorder_ref = self.recorders.read().await.get(&recorder_id).cloned();
-        if recorder_ref.is_none() && !self.db.has_recorder(platform.as_str(), room_id).await? {
+        let loaded = self
+            .retire_room(claim.clone(), platform, room_id, None)
+            .await
+            .map_err(std::io::Error::other)??;
+        if !loaded && !self.db.has_recorder(platform.as_str(), room_id).await? {
             return Err(RecorderManagerError::NotFound {
                 room_id: room_id.to_string(),
             });
         }
 
-        log::debug!("Stop recorder: {recorder_id}");
-        // Stop without holding the map's read lock: stop() awaits task shutdown.
-        if let Some(recorder_ref) = recorder_ref {
-            recorder_ref.stop().await;
-        }
-
-        // Keep the recorder/index available for retry if any backend operation
-        // fails. Historical archives can belong to different providers.
+        // The live map no longer contains a stopped producer. If storage fails,
+        // the catalog room remains available for retry and monitor reload.
         let recorder = {
             let room_stores = self
                 .archive_storage
@@ -1205,11 +1222,6 @@ impl RecorderManager {
             }
             recorder
         };
-
-        // remove recorder
-        log::debug!("Remove recorder from manager: {recorder_id}");
-        self.recorders.write().await.remove(&recorder_id);
-        self.db.notify_change(DataChange::Recorders);
 
         Ok(recorder)
     }
