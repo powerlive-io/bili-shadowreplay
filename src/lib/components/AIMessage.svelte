@@ -11,7 +11,7 @@
     type AssistantMessage,
     type ToolCall,
   } from "../agent/messages";
-  import { marked } from "marked";
+  import { renderSafeMarkdown } from "../safe-markdown";
   import CopyMarkdownButton from "./CopyMarkdownButton.svelte";
 
   interface Props {
@@ -111,7 +111,7 @@
                 <pre class="overflow-x-auto whitespace-pre-wrap break-words rounded-[8px] p-3 text-[12px]">{part.text}</pre>
               {:else}
                 <div class:table-container={containsTable(part.text)}>
-                  {@html marked(part.text)}
+                  {@html renderSafeMarkdown(part.text)}
                 </div>
               {/if}
             {/each}
