@@ -360,7 +360,7 @@ pub async fn update_upload(
     match state.db.get_upload(id).await {
         Ok(upload) => Err(ensure_editable(&upload)
             .err()
-            .unwrap_or_else(|| "投稿已在其他窗口修改，已载入最新内容".to_string())),
+            .unwrap_or_else(|| "投稿已在其他窗口修改，未覆盖最新内容".to_string())),
         Err(_) => Err("投稿已被删除".to_string()),
     }
 }

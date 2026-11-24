@@ -62,6 +62,8 @@
   let uid = $state(base.uid);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saving: Promise<void> | null = null;
+  let dirty = false;
+  let closing = $state(false);
   let saveError = $state("");
   let posting = $state(false);
   let generatingCover = $state(false);
@@ -130,50 +132,50 @@
   });
 
   onDestroy(() => {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save().catch(() => {});
-    }
+    if (saveTimer) void flushSave().catch(() => {});
   });
 
   /** Show the account and form as stored, unless edits here are unsaved. */
   function adopt() {
-    if (saveTimer || saving) return;
+    if (dirty || saving) return;
     if (upload.uid === base.uid && upload.profile === base.profile) return;
     base = { uid: upload.uid, profile: upload.profile };
     profile = parseProfile(base.profile);
     uid = base.uid;
   }
 
-  /** Save the form, after any save already in flight so the newest lands last. */
-  async function save() {
-    saveTimer = null;
-    while (saving) await saving;
+  /** Share pending writes and drain edits made before the previous write landed. */
+  async function flushSave() {
+    while (dirty || saving) {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = null;
+      saving ??= writeForm().finally(() => (saving = null));
+      await saving;
+    }
+  }
+
+  async function writeForm() {
     const snapshot = { uid, profile: $state.snapshot(profile) };
-    const request = invoke<string>("update_upload", {
-      id: upload.id,
-      ...snapshot,
-      baseUid: base.uid,
-      baseProfile: base.profile,
-    });
-    saving = request.then(
-      () => {},
-      () => {},
-    );
-    let stored: string;
+    dirty = false;
     try {
-      stored = await request;
+      const stored = await invoke<string>("update_upload", {
+        id: upload.id,
+        ...snapshot,
+        baseUid: base.uid,
+        baseProfile: base.profile,
+      });
+      base = { uid: snapshot.uid, profile: stored };
     } catch (error) {
-      saving = null;
+      dirty = true;
       saveError = String(error);
-      // Refused as saved in another window: show what it saved instead.
-      void onChanged().then(adopt, () => {});
       throw error;
     }
-    saving = null;
-    base = { uid: snapshot.uid, profile: stored };
     saveError = "";
-    saveRoomTemplate(upload.room_id, snapshot.profile);
+    try {
+      saveRoomTemplate(upload.room_id, snapshot.profile);
+    } catch (error) {
+      console.warn("草稿已保存，但无法缓存房间投稿模板：", error);
+    }
   }
 
   function setTags(tags: string[]) {
@@ -183,8 +185,9 @@
 
   function scheduleSave() {
     if (!editable) return;
+    dirty = true;
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void save().catch(() => {}), 600);
+    saveTimer = setTimeout(() => void flushSave().catch(() => {}), 600);
   }
 
   // Saved at once on its own: a project shares it with its editor, so the
@@ -233,8 +236,8 @@
       // The suggestion reads the saved profile: land pending edits first,
       // as `post` does, or the model sees stale title, desc and tags from
       // before the 600 ms autosave fired.
-      if (saveTimer) clearTimeout(saveTimer);
-      await save();
+      dirty = true;
+      await flushSave();
       const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", { id: upload.id });
       const covers = await renderAutoCover(suggestion, title);
       await invoke("update_upload_cover", { id: upload.id, ...covers });
@@ -263,8 +266,8 @@
     const eventId = generateEventId();
     try {
       // Waits for saves in flight: none may land once it is posting.
-      if (saveTimer) clearTimeout(saveTimer);
-      await save();
+      dirty = true;
+      await flushSave();
       // A project's video is rendered when posting, with its subtitles and
       // its texts and stickers as its editor draws them.
       let subtitleAss: string | null = null;
@@ -302,11 +305,24 @@
     }
   }
 
-  function close() {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save().catch(() => {});
+  async function close() {
+    if (closing) return;
+    closing = true;
+    try {
+      await flushSave();
+      onClose();
+    } catch {
+      // writeForm keeps the draft and its error visible for retry.
+    } finally {
+      closing = false;
     }
+  }
+
+  function discard() {
+    if (closing || saving) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    dirty = false;
     onClose();
   }
 </script>
@@ -545,7 +561,10 @@
         {/if}
       </span>
       <div class="flex shrink-0 gap-2">
-        <button type="button" class="ui-btn" onclick={close}>关闭</button>
+        {#if saveError}
+          <button type="button" class="ui-btn" disabled={closing} onclick={discard}>放弃修改并关闭</button>
+        {/if}
+        <button type="button" class="ui-btn" disabled={closing} onclick={close}>{saveError ? "重试保存并关闭" : "关闭"}</button>
         {#if editable}
           <button
             type="button"
