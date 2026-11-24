@@ -81,6 +81,27 @@ test("failure remains visible, releases busy state and allows retry", async () =
   assert.equal(f.get("busy"), false);
 });
 
+test("audio deletion waits for the desktop confirmation and respects cancellation", async () => {
+  const code = scriptCode(await read("src/lib/components/project/AudioPanel.svelte"), ["remove"]);
+  for (const accepted of [false, true]) {
+    const answer = deferred();
+    const opened = deferred();
+    const calls = [];
+    const context = vm.createContext({
+      invoke: async (name) => { calls.push(name); return []; },
+      confirm: () => { opened.resolve(); return answer.promise; },
+      playingId: 1, player: { pause: () => calls.push("pause") },
+    });
+    vm.runInContext(code, context);
+    const done = context.remove({ id: 1, name: "music" });
+    await opened.promise;
+    assert.deepEqual(calls, ["get_audio_usage"]);
+    answer.resolve(accepted);
+    await done;
+    assert.deepEqual(calls, accepted ? ["get_audio_usage", "pause", "delete_audio_file"] : ["get_audio_usage"]);
+  }
+});
+
 test("removal reports its own action label and Error message", async () => {
   const f = fixture(() => Promise.resolve(), { confirmLabel: "移除" });
   // Create the Error in the component's realm, as a real frontend callback would.

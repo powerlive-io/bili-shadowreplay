@@ -166,7 +166,7 @@
     const message = users.length
       ? `「${file.name}」正在被 ${users.length} 个切片使用：${titles}。删除后会从这些切片的音频轨上移除，确定删除吗？`
       : `确定删除「${file.name}」吗？`;
-    if (!confirm(message)) return;
+    if (!(await confirm(message))) return;
     if (playingId === file.id) {
       player?.pause();
       playingId = null;
