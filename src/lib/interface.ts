@@ -670,6 +670,14 @@ export function generateEventId() {
   return Math.random().toString(36).substring(2, 15);
 }
 
+export function generateVideoSubtitle(request: {
+  eventId: string;
+  id: number;
+  powerlive?: { context?: string; hotwords?: string[]; sentenceMaxLength?: number };
+}): Promise<string> {
+  return invoke<string>("generate_video_subtitle", request);
+}
+
 /**
  * Cut each range into its own material, or with `merge` join them into one,
  * optionally in a new project.

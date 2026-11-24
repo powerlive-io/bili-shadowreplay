@@ -1,42 +1,34 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import vm from "node:vm";
-import ts from "typescript";
+import { loadLibModule } from "./ts-module-fixture.mjs";
 
 async function fixture() {
   const calls = [];
-  const context = vm.createContext({});
-  const invoker = new vm.SyntheticModule(["invoke"], function () {
-    this.setExport("invoke", async (command, args) => {
-      calls.push({ command, args });
-      return "completed";
-    });
-  }, { context });
-  const mediaInterface = new vm.SyntheticModule(["default_profile", "generateEventId"], function () {
-    this.setExport("default_profile", () => ({}));
-    this.setExport("generateEventId", () => "media-operation");
-  }, { context });
-
-  async function load(name) {
-    const source = await readFile(new URL(`../../src/lib/agent/${name}.ts`, import.meta.url), "utf8");
-    const { outputText } = ts.transpileModule(source, {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
-    });
-    const module = new vm.SourceTextModule(outputText, { context });
-    await module.link((specifier) => {
-      if (specifier === "../invoker") return invoker;
-      if (specifier === "../interface") return mediaInterface;
-      if (specifier === "./messages") return load("messages");
-      throw new Error(`Unexpected dependency ${specifier}`);
-    });
-    return module;
-  }
-
-  const tools = await load("tools");
-  await tools.evaluate();
-  return { invoke: tools.namespace.invokeToolByName, calls };
+  const invoker = { invoke: async (command, args) => {
+    calls.push({ command, args });
+    return "completed";
+  } };
+  const tools = await loadLibModule("agent/tools", [], {
+    "../invoker": invoker,
+    "../interface": await loadLibModule("interface", [], { "../lib/invoker": invoker }),
+    "./messages": await loadLibModule("agent/messages"),
+  });
+  return { invoke: tools.invokeToolByName, calls };
 }
+
+test("confirmed subtitle generation sends a new task ID with the material ID", async () => {
+  const f = await fixture();
+  for (let i = 0; i < 2; i++) {
+    assert.equal(await f.invoke("generate_video_subtitle", { id: 42 }), "completed");
+  }
+  assert.equal(f.calls.length, 2);
+  for (const { command, args } of f.calls) {
+    assert.equal(command, "generate_video_subtitle");
+    assert.equal(args.id, 42);
+    assert.match(args.eventId, /\S/);
+  }
+  assert.notEqual(f.calls[0].args.eventId, f.calls[1].args.eventId);
+});
 
 test("stale arbitrary-command confirmations cannot invoke the backend", async () => {
   const f = await fixture();
