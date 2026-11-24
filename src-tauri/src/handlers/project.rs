@@ -593,7 +593,7 @@ async fn save_editor_timeline(
         // The backend's edits since the editor last heard: without what it
         // last saw, only the output settings.
         match &base {
-            Some(base) => timeline.merge_saved_edits(base, &current),
+            Some(base) => timeline.merge_saved_edits(base, &current)?,
             None => {
                 timeline.danmu = current.danmu;
                 timeline.render_settings = current.render_settings.clone();

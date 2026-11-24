@@ -547,9 +547,10 @@ impl Timeline {
     /// is being edited. Between `base`, the saved timeline the editor last
     /// knew, and `saved`, the saved one now, the backend may switch danmaku,
     /// remove the clips of a deleted material and fill clips that had none
-    /// with recognized subtitles; everything else stays as edited here. The
+    /// with recognized subtitles. Other editors can also update a clip's
+    /// cues; conflicting cue lists must not replace one another. The
     /// editor merges the same way when it hears of a change.
-    pub fn merge_saved_edits(&mut self, base: &Timeline, saved: &Timeline) {
+    pub fn merge_saved_edits(&mut self, base: &Timeline, saved: &Timeline) -> Result<(), String> {
         self.danmu = saved.danmu;
         self.render_settings = saved.render_settings.clone();
         let remaining = saved.material_ids();
@@ -564,17 +565,39 @@ impl Timeline {
                 self.remove_audio(audio_id);
             }
         }
-        let filled: Vec<TimelineSubtitle> = saved
-            .subtitles
-            .iter()
-            .filter(|subtitle| self.clips.iter().any(|clip| clip.id == subtitle.clip_id))
-            .filter(|subtitle| {
-                !base.subtitles.iter().any(|s| s.clip_id == subtitle.clip_id)
-                    && !self.subtitles.iter().any(|s| s.clip_id == subtitle.clip_id)
-            })
-            .cloned()
-            .collect();
-        self.subtitles.extend(filled);
+        // Compare each clip's whole cue list, just as the editor does on refresh.
+        fn by_clip(timeline: &Timeline) -> std::collections::HashMap<&str, Vec<&TimelineSubtitle>> {
+            let mut groups = std::collections::HashMap::<_, Vec<_>>::new();
+            for cue in &timeline.subtitles {
+                groups.entry(cue.clip_id.as_str()).or_default().push(cue);
+            }
+            groups
+        }
+        let before = by_clip(base);
+        let ours = by_clip(self);
+        let theirs = by_clip(saved);
+        let mut replace = std::collections::HashSet::new();
+        for clip in &self.clips {
+            let id = clip.id.as_str();
+            let (original, local, remote) = (before.get(id), ours.get(id), theirs.get(id));
+            if original == remote || local == remote {
+                continue;
+            }
+            if local != original {
+                return Err("同一片段的字幕已在其他窗口修改。请先复制本地字幕，再撤销冲突编辑或重新载入切片。".into());
+            }
+            replace.insert(id);
+        }
+        self.subtitles
+            .retain(|s| !replace.contains(s.clip_id.as_str()));
+        self.subtitles.extend(
+            saved
+                .subtitles
+                .iter()
+                .filter(|s| replace.contains(s.clip_id.as_str()))
+                .cloned(),
+        );
+        Ok(())
     }
 
     /// Distinct materials in timeline order: the main track's, then those of
@@ -1144,13 +1167,30 @@ mod tests {
             resolution: RenderResolution::Qhd2k,
         };
         edited.clips[0].end = 20.0;
-        edited.merge_saved_edits(&base, &saved);
+        edited.merge_saved_edits(&base, &saved).unwrap();
         assert_eq!(edited.clips[0].end, 20.0);
         assert_eq!(edited.render_settings, saved.render_settings);
         assert_ne!(base.render_hash(""), saved.render_hash(""));
         assert_eq!(Timeline::parse(&saved.to_json()).unwrap(), saved);
         saved.render_settings.bitrate_kbps = 100_001;
         assert!(saved.validate(|_| Some(30.0), |_| None).is_err());
+    }
+
+    #[test]
+    fn concurrent_subtitle_edits_survive_a_trim_but_not_a_conflicting_rewrite() {
+        let mut base = timeline();
+        base.set_clip_subtitles("a", vec![(1.0, 2.0, "old".into())]);
+        let mut saved = base.clone();
+        saved.subtitles[0].text = "corrected".into();
+        let mut trimmed = base.clone();
+        trimmed.clips[0].end -= 2.0;
+        trimmed.merge_saved_edits(&base, &saved).unwrap();
+        assert_eq!(trimmed.subtitles, saved.subtitles);
+        assert_eq!(trimmed.clips[0].end, base.clips[0].end - 2.0);
+
+        let mut conflicting = base.clone();
+        conflicting.subtitles.clear();
+        assert!(conflicting.merge_saved_edits(&base, &saved).is_err());
     }
 
     #[test]
@@ -1643,7 +1683,7 @@ mod tests {
         let saved = timeline();
         let mut edited = base.clone();
         edited.audio_tracks[0].items[0].volume = 1.0;
-        edited.merge_saved_edits(&base, &saved);
+        edited.merge_saved_edits(&base, &saved).unwrap();
         assert!(edited.audio_tracks.is_empty());
     }
 
