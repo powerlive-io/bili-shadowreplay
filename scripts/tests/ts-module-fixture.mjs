@@ -9,12 +9,13 @@ export function syntheticModule(exports) {
 }
 
 // Match the app's ESM output without relying on Node's native TS support.
-export async function loadLibModule(name, packages = []) {
+export async function loadLibModule(name, packages = [], bindings = {}) {
   const source = await readFile(new URL(`../../src/lib/${name}.ts`, import.meta.url), "utf8");
   const module = new vm.SourceTextModule(ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText);
   await module.link(async specifier => {
+    if (Object.hasOwn(bindings, specifier)) return syntheticModule(bindings[specifier]);
     if (!packages.includes(specifier)) throw new Error(`Unexpected ${name} dependency: ${specifier}`);
     return syntheticModule(await import(specifier));
   });

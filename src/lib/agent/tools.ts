@@ -2,6 +2,7 @@ import { invoke } from "../invoker";
 import {
   default_profile,
   generateEventId,
+  generateVideoSubtitle,
   type ClipRangeParams,
   type RenderSettings,
 } from "../interface";
@@ -83,7 +84,7 @@ const confirmedToolExecutors: Record<string, ToolExecutor> = {
   ),
 
   generate_video_subtitle: executor(
-    async ({ id }: { id: number }) => invoke("generate_video_subtitle", { id }),
+    async ({ id }: { id: number }) => generateVideoSubtitle({ eventId: generateEventId(), id }),
   ),
 
   encode_video_subtitle: executor(

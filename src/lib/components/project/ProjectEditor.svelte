@@ -46,6 +46,7 @@
   } from "../../cover-elements";
   import {
     generateEventId,
+    generateVideoSubtitle,
     type Config,
     type RecorderList,
     type AudioFile,
@@ -1554,7 +1555,7 @@
           });
           openTaskCenter(eventId);
           try {
-            srt = await invoke<string>("generate_video_subtitle", { eventId, id: materialId, powerlive });
+            srt = await generateVideoSubtitle({ eventId, id: materialId, powerlive });
           } finally {
             settleTask(eventId);
           }

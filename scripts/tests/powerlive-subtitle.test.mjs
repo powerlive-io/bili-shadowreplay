@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { loadLibModule } from "./ts-module-fixture.mjs";
 
 async function loadModule() {
   const source = await readFile(new URL("../../src/lib/powerlive-subtitle.ts", import.meta.url), "utf8");
@@ -158,6 +159,7 @@ test("the AI dialog loads both dictionaries and sends their current merged value
   });
   const helpers = await loadModule();
   const requests = [];
+  let announced;
   const state = {
     ...Object.fromEntries(Object.entries(helpers)),
     project: { platform: "bilibili" }, roomId: "1", TAURI_ENV: false,
@@ -175,10 +177,12 @@ test("the AI dialog loads both dictionaries and sends their current merged value
       requests.push(JSON.parse(JSON.stringify(args)));
       return "";
     },
-    generateEventId: () => "subtitle-1", announceTask() {}, openTaskCenter() {}, settleTask() {},
+    generateEventId: () => "subtitle-1", announceTask(task) { announced = task.id; }, openTaskCenter() {}, settleTask() {},
     parseSrt: () => [], setClipSubtitles: (timeline) => timeline, commit() {},
     alert(message) { assert.fail(message); }, console,
   };
+  const { generateVideoSubtitle } = await loadLibModule("interface", [], { "../lib/invoker": { invoke: state.invoke } });
+  state.generateVideoSubtitle = generateVideoSubtitle;
   Object.defineProperty(state, "aiMergedHotwords", { get: () => helpers.mergeHotwords(state.aiRoomHotwords, state.aiGlobalHotwords) });
   vm.runInContext(outputText, vm.createContext(state));
   await state.openAiModal();
@@ -189,6 +193,9 @@ test("the AI dialog loads both dictionaries and sends their current merged value
   // Even if automatic saves are pending, recognize with what the user sees.
   state.aiRoomHotwords.push("新角色");
   await state.generateSubtitles();
+  assert.equal(requests[0].id, 1);
+  assert.equal(requests[0].eventId, "subtitle-1");
+  assert.equal(requests[0].eventId, announced);
   assert.deepEqual(requests[0].powerlive.hotwords, ["主播甲", "共用词", "新角色", "全局词"]);
   assert.equal(state.aiRunning, false);
   state.project = { platform: "douyu" };
