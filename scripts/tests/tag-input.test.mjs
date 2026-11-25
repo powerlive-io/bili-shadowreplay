@@ -106,7 +106,7 @@ test("caller-specific validation, splitting, and limits preserve refused drafts"
   assert.equal(f.get("problem"), "最多 2 个热词");
 });
 
-test("upload tag changes keep the persisted string format and schedule autosave", async () => {
+test("upload tag changes keep the string format without autosaving", async () => {
   const upload = await readFile(new URL("../../src/lib/components/upload/UploadEditor.svelte", import.meta.url), "utf8");
   const script = upload.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
   const parsed = ts.createSourceFile("UploadEditor.ts", script, ts.ScriptTarget.Latest, true);
@@ -122,7 +122,7 @@ test("upload tag changes keep the persisted string format and schedule autosave"
   assert.equal(state.profile.tag, "游戏,直播");
   state.setTags([]);
   assert.equal(state.profile.tag, "");
-  assert.equal(saves, 2);
+  assert.equal(saves, 0);
   assert.match(upload, /onChange=\{setTags\}/);
   assert.match(source, /onblur=\{\(\) => draft.trim\(\) && commit\(\)\}/);
 });

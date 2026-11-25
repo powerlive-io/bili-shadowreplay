@@ -13,7 +13,7 @@
     Upload,
     X,
   } from "lucide-svelte";
-  import { onDestroy, untrack } from "svelte";
+  import { untrack } from "svelte";
   import { trapFocus } from "../../focus-trap";
   import { get_static_url, invoke } from "../../invoker";
   import {
@@ -52,18 +52,17 @@
 
   let { upload, accounts, onChanged, onClose }: Props = $props();
 
-  // Edited locally and saved shortly after each change; the editor is
-  // recreated for each upload. Another window can edit the same draft, so
-  // each save is made over `base`, the stored account and form the local
-  // ones came from, and the backend refuses it once the other saved since.
-  const initial = () => ({ uid: upload.uid, profile: upload.profile });
-  let base = initial();
-  let profile = $state(parseProfile(base.profile));
-  let uid = $state(base.uid);
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let saving: Promise<void> | null = null;
-  let dirty = false;
-  let closing = $state(false);
+  // An id of zero is a source preview, never a persisted draft.
+  let base = $state.raw(untrack(() => upload));
+  let profile = $state(untrack(() => parseProfile(base.profile)));
+  let fallbackTid: number | undefined = $state();
+  let uid = $state(untrack(() => base.uid));
+  let danmu = $state(untrack(() => base.danmu));
+  let renderSettings = $state(untrack(() => ({ ...(base.render_settings ?? defaultRenderSettings()) })));
+  type Covers = { cover: string; cover43: string };
+  let covers: Covers | null = $state.raw(null);
+  let saving = $state(false);
+  let confirmClose = $state(false);
   let saveError = $state("");
   let posting = $state(false);
   let generatingCover = $state(false);
@@ -79,16 +78,15 @@
   let closeButton: HTMLButtonElement | undefined = $state();
 
   let editable = $derived(isUploadEditable(upload));
-  let savingDanmu = $state(false);
-  let savingRenderSettings = $state(false);
-  let renderSettings = $state(defaultRenderSettings());
-  $effect(() => {
-    const settings = upload.render_settings;
-    if (!savingRenderSettings) renderSettings = { ...(settings ?? defaultRenderSettings()) };
-  });
+  let busy = $derived(saving || posting);
+  let originalProfile = $derived(parseProfile(base.profile));
+  let originalSettings = $derived(base.render_settings ?? defaultRenderSettings());
+  let settingsChanged = $derived(JSON.stringify(renderSettings) !== JSON.stringify(originalSettings));
+  let dirty = $derived(uid !== base.uid || JSON.stringify(profile) !== JSON.stringify(originalProfile)
+    || danmu !== base.danmu || settingsChanged || covers !== null);
   // Turning it off stays possible even when there is nothing to burn.
   let canToggleDanmu = $derived(
-    editable && !posting && (upload.danmu_available || upload.danmu) && !savingDanmu,
+    editable && !busy && (upload.danmu_available || danmu),
   );
   let active = $derived(isUploadActive(upload));
   let blocker = $derived(
@@ -105,14 +103,15 @@
   );
 
   $effect(() => {
-    const cover = upload.display_cover;
+    const cover = covers?.cover ?? base.display_cover;
     coverFailed = false;
-    if (!cover) {
-      coverUrl = "";
+    if (!cover || cover.startsWith("data:image/jpeg;base64,")) {
+      coverUrl = cover || "";
       return;
     }
-    // Each saved cover is a new file, so its URL changes with it.
-    void get_static_url("output", cover).then((url) => (coverUrl = url));
+    let current = true;
+    void get_static_url("output", cover).then((url) => { if (current) coverUrl = url; });
+    return () => { current = false; };
   });
 
   $effect(() => {
@@ -124,125 +123,81 @@
     void get_static_url(video.base, video.path).then((url) => (videoUrl = url));
   });
 
-  // Take up a form saved in another window as it arrives.
+  // Refresh clean editors, never replace an uncommitted edit (including a cover).
   $effect(() => {
-    void upload.uid;
-    void upload.profile;
-    untrack(adopt);
+    const remote = upload;
+    untrack(() => {
+      if (remote.id && !dirty && !busy && !showCoverEditor && !generatingCover) adopt(remote);
+    });
   });
 
-  onDestroy(() => {
-    if (saveTimer) void flushSave().catch(() => {});
-  });
-
-  /** Show the account and form as stored, unless edits here are unsaved. */
-  function adopt() {
-    if (dirty || saving) return;
-    if (upload.uid === base.uid && upload.profile === base.profile) return;
-    base = { uid: upload.uid, profile: upload.profile };
-    profile = parseProfile(base.profile);
-    uid = base.uid;
+  function adopt(item: UploadItem) {
+    base = item;
+    uid = item.uid;
+    profile = parseProfile(item.profile);
+    danmu = item.danmu;
+    renderSettings = { ...(item.render_settings ?? defaultRenderSettings()) };
+    covers = null;
   }
 
-  /** Share pending writes and drain edits made before the previous write landed. */
-  async function flushSave() {
-    while (dirty || saving) {
-      if (saveTimer) clearTimeout(saveTimer);
-      saveTimer = null;
-      saving ??= writeForm().finally(() => (saving = null));
-      await saving;
-    }
+  function draftSource() {
+    return { source: base.source, sourceId: base.source_id, file: base.file };
   }
 
-  async function writeForm() {
-    const snapshot = { uid, profile: $state.snapshot(profile) };
-    dirty = false;
+  async function persist() {
+    const snapshot = $state.snapshot(profile);
+    snapshot.tid = fallbackTid ?? snapshot.tid;
+    const stored = await invoke<UploadItem>("save_upload_draft", { edit: {
+      id: base.id, source: base.id ? null : draftSource(), expectedAt: base.updated_at,
+      uid, profile: snapshot,
+      danmu: danmu !== base.danmu ? { base: base.danmu, value: danmu } : null,
+      renderSettings: settingsChanged ? { base: originalSettings, value: $state.snapshot(renderSettings) } : null,
+      covers: covers ?? (!base.id && base.display_cover?.startsWith("data:image/jpeg;base64,")
+        ? { cover: base.display_cover } : null),
+    } });
+    adopt(stored);
     try {
-      const stored = await invoke<string>("update_upload", {
-        id: upload.id,
-        ...snapshot,
-        baseUid: base.uid,
-        baseProfile: base.profile,
-      });
-      base = { uid: snapshot.uid, profile: stored };
-    } catch (error) {
-      dirty = true;
-      saveError = String(error);
-      throw error;
-    }
-    saveError = "";
-    try {
-      saveRoomTemplate(upload.room_id, snapshot.profile);
+      saveRoomTemplate(stored.room_id, snapshot);
     } catch (error) {
       console.warn("草稿已保存，但无法缓存房间投稿模板：", error);
     }
+    return stored.id;
   }
 
   function setTags(tags: string[]) {
     profile.tag = tags.join(",");
-    scheduleSave();
   }
 
-  function scheduleSave() {
-    if (!editable) return;
-    dirty = true;
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void flushSave().catch(() => {}), 600);
-  }
-
-  // Saved at once on its own: a project shares it with its editor, so the
-  // debounced form save must not carry a stale value.
-  async function setDanmu(input: HTMLInputElement) {
-    savingDanmu = true;
+  async function saveDraft() {
+    if (!editable || busy || generatingCover) return;
+    saving = true;
+    confirmClose = false;
+    saveError = "";
     try {
-      await invoke("update_upload_danmu", { id: upload.id, danmu: input.checked });
-      await onChanged();
+      await persist();
+      onClose();
+      void onChanged().catch(console.error);
     } catch (error) {
-      input.checked = upload.danmu;
-      alert("修改弹幕设置失败：" + error);
+      saveError = String(error).replace(/^.*?Failed to invoke save_upload_draft:\s*(?:Error:\s*)?/s, "");
     } finally {
-      savingDanmu = false;
+      saving = false;
     }
   }
 
-  async function saveRenderSettings() {
-    if (!editable || posting || savingRenderSettings) return;
-    savingRenderSettings = true;
-    try {
-      await invoke("update_upload_render_settings", {
-        id: upload.id,
-        renderSettings: $state.snapshot(renderSettings),
-      });
-      await onChanged();
-    } catch (error) {
-      alert("修改压制设置失败：" + error);
-    } finally {
-      savingRenderSettings = false;
-    }
-  }
-
-  async function saveCover(covers: { cover: string; cover43: string }) {
-    await invoke("update_upload_cover", { id: upload.id, ...covers });
-    // The previous file is gone; show the new one now.
-    await onChanged();
+  async function saveCover(images: Covers) {
+    covers = images;
   }
 
   /** AI 挑一帧画面并排上标题，生成即替换当前封面；不满意可再手动编辑。 */
   async function generateCover() {
     const title = profile.title.trim();
-    if (!editable || posting || generatingCover || !title) return;
+    if (!editable || busy || generatingCover || !title) return;
     generatingCover = true;
     try {
-      // The suggestion reads the saved profile: land pending edits first,
-      // as `post` does, or the model sees stale title, desc and tags from
-      // before the 600 ms autosave fired.
-      dirty = true;
-      await flushSave();
-      const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", { id: upload.id });
-      const covers = await renderAutoCover(suggestion, title);
-      await invoke("update_upload_cover", { id: upload.id, ...covers });
-      // The previous file is gone; show the new one now.
-      await onChanged();
+      const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", {
+        id: base.id, source: base.id ? null : draftSource(), profile: $state.snapshot(profile),
+      });
+      covers = await renderAutoCover(suggestion, title);
       // The AI cover replaced the file underneath the manual editor: bump
       // the key so reopening rebuilds it from the new picture instead of
       // keeping the pre-AI composition that would overwrite the result.
@@ -260,14 +215,12 @@
   async function post() {
     // Not while a cover generation runs: it saves its cover after the
     // upload is claimed, which is refused, so the old cover would publish.
-    if (!editable || blocker || posting || savingDanmu || savingRenderSettings || generatingCover)
+    if (!editable || blocker || busy || generatingCover)
       return;
     posting = true;
     const eventId = generateEventId();
     try {
-      // Waits for saves in flight: none may land once it is posting.
-      dirty = true;
-      await flushSave();
+      const id = await persist();
       // A project's video is rendered when posting, with its subtitles and
       // its texts and stickers as its editor draws them.
       let subtitleAss: string | null = null;
@@ -291,12 +244,12 @@
       announceTask({
         id: eventId,
         task_type: "upload",
-        metadata: JSON.stringify({ upload_id: upload.id, title: profile.title }),
+        metadata: JSON.stringify({ upload_id: id, title: profile.title }),
       });
-      await invoke("post_upload", { eventId, id: upload.id, subtitleAss, overlays });
+      await invoke("post_upload", { eventId, id, subtitleAss, overlays });
       openTaskCenter(eventId);
-      // Show the attempt as running before allowing another click.
-      await onChanged();
+      onClose();
+      void onChanged().catch(console.error);
     } catch (error) {
       alert("投稿失败：" + (error instanceof Error ? error.message : error));
     } finally {
@@ -305,39 +258,29 @@
     }
   }
 
-  async function close() {
-    if (closing) return;
-    closing = true;
-    try {
-      await flushSave();
-      onClose();
-    } catch {
-      // writeForm keeps the draft and its error visible for retry.
-    } finally {
-      closing = false;
-    }
-  }
-
-  function discard() {
-    if (closing || saving) return;
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = null;
-    dirty = false;
-    onClose();
+  function close() {
+    if (busy || generatingCover) return;
+    if (dirty) confirmClose = true;
+    else onClose();
   }
 </script>
 
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === "Escape" && !showCoverEditor) {
+    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !showCoverEditor) {
       event.preventDefault();
-      close();
+      if (confirmClose) confirmClose = false;
+      else {
+        // Commit the tag input's pending text before checking for edits.
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        close();
+      }
     }
   }}
 />
 
 <!-- Above full-window editors such as the clip editor (z-1000). -->
-<div class="ui-modal-backdrop z-[1100]">
+<div class="ui-modal-backdrop z-[1100]" inert={confirmClose}>
   <div
     use:trapFocus={{ initial: () => (editable ? titleInput : closeButton) }}
     class="ui-modal max-h-[90vh] w-[820px] max-w-full"
@@ -354,6 +297,7 @@
         type="button"
         class="ui-btn ui-btn-sm ui-btn-icon ui-btn-ghost -mr-1.5"
         aria-label="关闭"
+        disabled={busy || generatingCover}
         bind:this={closeButton}
         onclick={close}
       >
@@ -404,7 +348,7 @@
                   <button
                     type="button"
                     class="ui-btn ui-btn-sm"
-                    disabled={posting || generatingCover || !profile.title.trim()}
+                    disabled={busy || generatingCover || !profile.title.trim()}
                     title={profile.title.trim() ? "AI 挑选画面并排上标题" : "先填写标题再生成封面"}
                     onclick={generateCover}
                   >
@@ -418,7 +362,7 @@
                   <button
                     type="button"
                     class="ui-btn ui-btn-sm"
-                    disabled={posting || generatingCover}
+                    disabled={busy || generatingCover}
                     title={generatingCover ? "AI 封面生成中，完成后再手动编辑" : undefined}
                     onclick={() => (showCoverEditor = true)}
                   >
@@ -451,7 +395,7 @@
                 <p class="break-all font-mono text-[11px] text-fg-muted">{upload.file}</p>
               {/if}
               <p class="text-[11px] leading-relaxed {upload.source_state === 'missing' ? 'text-danger-fg' : 'text-fg-muted'}">
-                {sourceDescription(upload)}
+                {sourceDescription({ ...upload, danmu, source_state: upload.source === "material" && upload.source_state !== "missing" ? (danmu && upload.danmu_available ? "render" : "material") : upload.source_state })}
               </p>
               {#if upload.source !== "file" && upload.source_state !== "missing" && !upload.danmu_embedded}
                 <label
@@ -474,9 +418,8 @@
                   <span class="ui-switch mt-0.5">
                     <input
                       type="checkbox"
-                      checked={upload.danmu}
+                      bind:checked={danmu}
                       disabled={!canToggleDanmu}
-                      onchange={(event) => setDanmu(event.currentTarget)}
                     />
                     <span></span>
                   </span>
@@ -484,14 +427,13 @@
               {/if}
             </div>
           </section>
-          {#if (upload.source === "project" || (upload.source === "material" && upload.danmu && upload.danmu_available)) && upload.source_state !== "missing"}
+          {#if (upload.source === "project" || (upload.source === "material" && danmu && upload.danmu_available)) && upload.source_state !== "missing"}
             <section class="space-y-2">
               <span class="ui-label">画质、分辨率与码率</span>
               <div class="ui-card space-y-2 bg-control/50 p-3">
                 <RenderSettingsFields
                   bind:value={renderSettings}
-                  disabled={!editable || posting || savingRenderSettings}
-                  onChange={saveRenderSettings}
+                  disabled={!editable || busy}
                 />
                 <p class="ui-hint">{upload.source === "project" ? "与此切片的导出设置同步。" : "投稿压制弹幕时使用这些设置。"}</p>
               </div>
@@ -501,9 +443,7 @@
 
         <fieldset
           class="min-w-0 space-y-3.5 disabled:opacity-70"
-          disabled={!editable || posting}
-          oninput={scheduleSave}
-          onchange={scheduleSave}
+          disabled={!editable || busy}
         >
           <label class="block space-y-1.5">
             <span class="ui-label">标题</span>
@@ -518,7 +458,7 @@
           </label>
           <div class="space-y-1.5">
             <span class="ui-label">视频分区</span>
-            <TypeSelect bind:value={profile.tid} disabled={!editable} />
+            <TypeSelect bind:value={profile.tid} bind:fallback={fallbackTid} disabled={!editable || busy} />
           </div>
           <label class="block space-y-1.5">
             <span class="ui-label">投稿账号</span>
@@ -541,7 +481,7 @@
             <TagInput
               value={[...new Set(profile.tag.split(",").map((tag) => tag.trim()).filter(Boolean))]}
               onChange={setTags}
-              disabled={!editable || posting}
+              disabled={!editable || busy}
             />
           </div>
           <label class="block space-y-1.5">
@@ -556,20 +496,17 @@
       <span class="min-w-0 truncate text-[11px] {saveError ? 'text-danger-fg' : 'text-fg-muted'}">
         {#if saveError}
           保存失败：{saveError}
-        {:else if editable}
-          修改会自动保存为草稿
+        {:else if editable && dirty}
+          有未保存的修改
         {/if}
       </span>
       <div class="flex shrink-0 gap-2">
-        {#if saveError}
-          <button type="button" class="ui-btn" disabled={closing} onclick={discard}>放弃修改并关闭</button>
-        {/if}
-        <button type="button" class="ui-btn" disabled={closing} onclick={close}>{saveError ? "重试保存并关闭" : "关闭"}</button>
         {#if editable}
+          <button type="button" class="ui-btn" disabled={busy || generatingCover} onclick={saveDraft}>{saving ? "保存中…" : "保存草稿"}</button>
           <button
             type="button"
             class="ui-btn ui-btn-primary"
-            disabled={Boolean(blocker) || posting || savingDanmu || savingRenderSettings || generatingCover}
+            disabled={Boolean(blocker) || busy || generatingCover}
             title={blocker || undefined}
             onclick={post}
           >
@@ -585,6 +522,20 @@
     </div>
   </div>
 </div>
+
+{#if confirmClose}
+  <div class="ui-modal-backdrop z-[1110]">
+    <div class="ui-modal max-w-sm" role="alertdialog" aria-modal="true" aria-labelledby="draft-close-title" use:trapFocus>
+      <div class="ui-modal-header"><h3 id="draft-close-title">保存本次修改？</h3></div>
+      <div class="ui-modal-body text-sm text-fg-muted">不保存就关闭，本次修改将丢失。</div>
+      <div class="ui-modal-footer">
+        <button type="button" class="ui-btn" onclick={() => (confirmClose = false)}>继续编辑</button>
+        <button type="button" class="ui-btn" onclick={onClose}>不保存</button>
+        <button type="button" class="ui-btn ui-btn-primary" disabled={!editable} onclick={saveDraft}>保存草稿</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#key coverEditorKey}
   <CoverEditor

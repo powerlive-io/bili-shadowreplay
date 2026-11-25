@@ -123,8 +123,8 @@ test("a source's unposted draft is reused, and a new one started once it is post
   assert.equal((await api.draftUpload(pick, others)).id, 9);
   assert.deepEqual(calls, [
     {
-      command: "create_upload",
-      args: { source: "project", sourceId: 3, file: "", profile: { ...DEFAULT_PROFILE, title: "切片" } },
+      command: "preview_upload",
+      args: { source: { source: "project", sourceId: 3, file: "" }, profile: { ...DEFAULT_PROFILE, title: "切片" } },
     },
   ]);
 

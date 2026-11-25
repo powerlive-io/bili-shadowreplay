@@ -49,21 +49,12 @@ export async function draftUpload(pick: UploadPick, uploads: UploadItem[]): Prom
     );
     if (draft) return draft;
   }
-  const args =
-    pick.source === "material"
-      ? {
-          sourceId: pick.item.id,
-          file: "",
-          profile: draftProfile(pick.item.room_id, pick.item.title || fileStem(pick.item.file)),
-        }
-      : pick.source === "project"
-        ? {
-            sourceId: pick.item.id,
-            file: "",
-            profile: draftProfile(pick.item.room_id, pick.item.title, pick.item.profile),
-          }
-        : { sourceId: 0, file: pick.file, profile: draftProfile("", fileStem(pick.file)) };
-  return invoke<UploadItem>("create_upload", { source: pick.source, ...args });
+  const source = { source: pick.source, sourceId: pick.source === "file" ? 0 : pick.item.id,
+    file: pick.source === "file" ? pick.file : "" };
+  const profile = pick.source === "file" ? draftProfile("", fileStem(pick.file))
+    : pick.source === "project" ? draftProfile(pick.item.room_id, pick.item.title, pick.item.profile)
+    : draftProfile(pick.item.room_id, pick.item.title || fileStem(pick.item.file));
+  return invoke<UploadItem>("preview_upload", { source, profile });
 }
 
 /** The Bilibili accounts uploads can be posted with. */

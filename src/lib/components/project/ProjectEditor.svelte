@@ -1802,7 +1802,7 @@
   // Follow the open draft as it posts and as the project changes under it.
   const uploadRefresh = createStateRefresh(async () => {
     const id = uploadDraft?.id;
-    if (id === undefined) return;
+    if (!id) return; // An unsaved upload preview has no database row yet.
     const fresh = await invoke<UploadItem>("get_upload", { id });
     // Closed, or another draft opened, while it loaded.
     if (uploadDraft?.id === id) uploadDraft = fresh;

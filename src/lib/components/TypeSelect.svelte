@@ -4,20 +4,22 @@
 
   interface Props {
     value?: number;
+    fallback?: number;
     disabled?: boolean;
   }
 
-  let { value = $bindable(0), disabled = false }: Props = $props();
+  let { value = $bindable(0), fallback = $bindable(), disabled = false }: Props = $props();
   let items: VideoType[] = $state([]);
   let error = $state("");
 
-  let parent = $derived(items.find((item) => item.children.some((child) => child.id === value)));
+  let matched = $derived(items.find((item) => item.children.some((child) => child.id === value)));
+  let parent = $derived(matched ?? items[0]);
+  // A default is not a user edit. Only materialize it when explicitly saving.
+  $effect(() => { fallback = matched ? undefined : parent?.children[0]?.id; });
 
   async function load() {
     try {
       items = await invoke<VideoType[]>("get_video_typelist");
-      // Bilibili requires an area, so an unknown one falls back to the first.
-      if (!parent && items[0]?.children[0]) value = items[0].children[0].id;
     } catch (e) {
       console.error("Failed to load video types:", e);
       error = "无法读取分区列表，请先在「账号」页登录 B 站账号。";
@@ -47,7 +49,8 @@
   <select
     class="ui-input min-w-0 flex-1"
     aria-label="子分区"
-    bind:value
+    value={fallback ?? value}
+    onchange={(event) => (value = Number(event.currentTarget.value))}
     disabled={disabled || !parent}
   >
     {#each parent?.children ?? [] as child (child.id)}

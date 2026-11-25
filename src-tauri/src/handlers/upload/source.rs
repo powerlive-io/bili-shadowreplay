@@ -53,40 +53,46 @@ pub(super) async fn save_draft(
 ) -> Result<UploadRow, String> {
     tokio::spawn(async move {
         let _operation = operation;
-        let staged = if upload.source == "file" {
-            let file = PathBuf::from(&upload.file);
-            let root = source_root(&output);
-            let staged = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-                let file = file.canonicalize()?;
-                let session_root = session.root().canonicalize()?;
-                let owned_root = root.canonicalize().ok();
-                if !file.starts_with(session_root)
-                    && !owned_root.is_some_and(|root| file.starts_with(root))
-                {
-                    // Desktop-selected user files remain external references.
-                    return Ok(None);
-                }
-                copy_source(&file, &root).map(Some)
-            })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| format!("保存投稿源文件失败: {error}"))?;
-            if let Some((_, target)) = &staged {
-                upload.file = target.to_string_lossy().into_owned();
-            }
-            staged
-        } else {
-            None
-        };
+        let staged = stage_source(&mut upload, session, &output).await?;
         let saved = db.add_upload(&upload).await?;
-        if let Some((directory, _)) = staged {
-            // No await between DB acknowledgement and relinquishing cleanup.
+        if let Some(directory) = staged {
             let _ = directory.keep();
         }
         Ok(saved)
     })
     .await
     .map_err(|error| format!("保存投稿草稿失败: {error}"))?
+}
+
+pub(super) async fn stage_source(
+    upload: &mut UploadRow,
+    session: TempStorage,
+    output: &Path,
+) -> Result<Option<tempfile::TempDir>, String> {
+    if upload.source == "file" {
+        let file = PathBuf::from(&upload.file);
+        let root = source_root(output);
+        let staged = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            let file = file.canonicalize()?;
+            let session_root = session.root().canonicalize()?;
+            let owned_root = root.canonicalize().ok();
+            if !file.starts_with(session_root)
+                && !owned_root.is_some_and(|root| file.starts_with(root))
+            {
+                // Desktop-selected user files remain external references.
+                return Ok(None);
+            }
+            copy_source(&file, &root).map(Some)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("保存投稿源文件失败: {error}"))?;
+        if let Some((dir, target)) = staged {
+            upload.file = target.to_string_lossy().into_owned();
+            return Ok(Some(dir));
+        }
+    }
+    Ok(None)
 }
 
 /// Copy first and keep originals until every row has been atomically rebound.
@@ -336,6 +342,49 @@ mod tests {
             &input,
         )
         .unwrap();
+        // Opening the editor only previews the session file. A failed cover
+        // write rolls back its row and durable copy along with the form.
+        let draft_source = serde_json::json!({ "source": "file", "file": input });
+        let preview = super::super::draft::preview_upload(
+            state.clone(),
+            serde_json::from_value(draft_source.clone()).unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.upload.id, 0);
+        assert!(preview.display_cover.starts_with("data:image/jpeg;base64,"));
+        assert!(state.db.get_uploads().await.unwrap().is_empty());
+        let mut edit = serde_json::json!({
+            "id": 0, "source": draft_source, "uid": "", "profile": {"title":"new"},
+            "covers": {"cover": preview.display_cover, "cover43": "invalid"}
+        });
+        assert!(super::super::draft::save_upload_draft(
+            state.clone(),
+            serde_json::from_value(edit.clone()).unwrap(),
+        )
+        .await
+        .is_err());
+        assert!(state.db.get_uploads().await.unwrap().is_empty());
+        edit["covers"]["cover43"] = serde_json::Value::Null;
+        let saved = super::super::draft::save_upload_draft(
+            state.clone(),
+            serde_json::from_value(edit.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(output.join(&saved.upload.cover).is_file());
+        edit["id"] = saved.upload.id.into();
+        edit["expectedAt"] = "stale".into();
+        assert!(super::super::draft::save_upload_draft(
+            state.clone(),
+            serde_json::from_value(edit).unwrap(),
+        )
+        .await
+        .is_err());
+        super::super::delete_upload(state.clone(), saved.upload.id)
+            .await
+            .unwrap();
         let created = super::super::create_upload(
             state.clone(),
             "file".into(),

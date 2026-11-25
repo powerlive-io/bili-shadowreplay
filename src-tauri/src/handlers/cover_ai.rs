@@ -167,8 +167,17 @@ async fn request_frame_suggestion(
 pub async fn suggest_upload_cover(
     state: state_type!(),
     id: i64,
+    source: Option<crate::handlers::upload::draft::DraftSource>,
+    profile: Option<serde_json::Value>,
 ) -> Result<CoverSuggestion, String> {
-    let upload = state.db.get_upload(id).await?;
+    let upload = if id == 0 {
+        source
+            .ok_or("缺少投稿来源")?
+            .row(&state, serde_json::Value::Null)
+            .await?
+    } else {
+        state.db.get_upload(id).await?
+    };
     ensure_editable(&upload)?;
     let video = frame_video_path(&state, &upload)
         .await
@@ -212,8 +221,8 @@ pub async fn suggest_upload_cover(
         return Err("无法从视频中抽取画面帧".to_string());
     }
 
-    let profile: serde_json::Value =
-        serde_json::from_str(&upload.profile).unwrap_or(serde_json::Value::Null);
+    let profile =
+        profile.unwrap_or_else(|| serde_json::from_str(&upload.profile).unwrap_or_default());
     let field = |name: &str| {
         profile[name]
             .as_str()
