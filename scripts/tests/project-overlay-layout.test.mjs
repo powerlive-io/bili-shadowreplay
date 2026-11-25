@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { coverModelModule } from "./cover-model-fixture.mjs";
 
 const transpile = (text) => ts.transpileModule(text, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -18,7 +19,7 @@ async function fixture() {
       return canvas;
     } },
   });
-  const model = new vm.SourceTextModule(transpile(await readFile(new URL("../../src/lib/cover-elements.ts", import.meta.url), "utf8")), { context });
+  const model = await coverModelModule(context);
   const render = new vm.SyntheticModule(["drawElements", "drawSticker", "drawText", "loadSticker", "measure"], function() {
     this.setExport("drawElements", () => []);
     this.setExport("drawSticker", () => {});
@@ -84,9 +85,7 @@ async function stageFixture(mode = "move") {
   const ast = ts.createSourceFile("Stage.ts", script, ts.ScriptTarget.Latest, true);
   const names = ["boxOf", "toFrame", "hitTest", "handlePointerMove"];
   const functions = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
-  const model = new vm.SourceTextModule(transpile(await readFile(new URL("../../src/lib/cover-elements.ts", import.meta.url), "utf8")));
-  await model.link(() => { throw new Error("unexpected dependency"); });
-  await model.evaluate();
+  const model = await coverModelModule();
   const item = sticker();
   const changes = [];
   const state = {

@@ -25,6 +25,9 @@ pub struct UploadRow {
     /// 4:3 cover for the homepage feed, relative to the output directory;
     /// empty to let Bilibili crop `cover`.
     pub cover43: String,
+    /// Self-contained editable source for this exact pair of JPEGs, relative to output.
+    #[serde(default)]
+    pub cover_project: String,
     /// Bilibili `Profile` JSON.
     pub profile: String,
     /// Burn a material's danmaku into the posted video. A project keeps this
@@ -56,7 +59,7 @@ const ACTIVE: &str = "status IN ('exporting', 'posting')";
 
 pub(super) fn insert_upload(upload: &UploadRow) -> Query<'_, Sqlite, SqliteArguments<'_>> {
     sqlx::query(
-        "INSERT INTO uploads (source, source_id, file, room_id, uid, cover, cover43, profile, danmu, status, message, bvid, created_at, updated_at, render_settings_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+        "INSERT INTO uploads (source, source_id, file, room_id, uid, cover, cover43, profile, danmu, status, message, bvid, created_at, updated_at, render_settings_json, cover_project) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(&upload.source)
     .bind(upload.source_id)
@@ -73,6 +76,7 @@ pub(super) fn insert_upload(upload: &UploadRow) -> Query<'_, Sqlite, SqliteArgum
     .bind(&upload.created_at)
     .bind(&upload.updated_at)
     .bind(&upload.render_settings_json)
+    .bind(&upload.cover_project)
 }
 
 impl Database {
@@ -173,16 +177,18 @@ impl Database {
         let mut tx = self.pool.begin().await?;
         for (old, next) in rows {
             let updated = sqlx::query(
-                "UPDATE uploads SET file=?,cover=?,cover43=? WHERE id=? AND source='file' \
-                 AND file=? AND cover=? AND cover43=? AND status NOT IN ('exporting','posting')",
+                "UPDATE uploads SET file=?,cover=?,cover43=?,cover_project=? WHERE id=? AND source='file' \
+                 AND file=? AND cover=? AND cover43=? AND cover_project=? AND status NOT IN ('exporting','posting')",
             )
             .bind(&next.file)
             .bind(&next.cover)
             .bind(&next.cover43)
+            .bind(&next.cover_project)
             .bind(old.id)
             .bind(&old.file)
             .bind(&old.cover)
             .bind(&old.cover43)
+            .bind(&old.cover_project)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -264,7 +270,7 @@ impl Database {
     ) -> Result<bool, DatabaseError> {
         self.apply_upload_update(
             sqlx::query(&format!(
-                "UPDATE uploads SET cover = $1, cover43 = $2, updated_at = $3 WHERE id = $4 AND {EDITABLE}"
+                "UPDATE uploads SET cover = $1, cover43 = $2, cover_project = '', updated_at = $3 WHERE id = $4 AND {EDITABLE}"
             ))
             .bind(cover)
             .bind(cover43)
@@ -435,6 +441,7 @@ mod tests {
             uid: "1".into(),
             cover: String::new(),
             cover43: String::new(),
+            cover_project: String::new(),
             profile: "{}".into(),
             danmu: false,
             render_settings_json: "{}".to_string(),

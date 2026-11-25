@@ -90,18 +90,19 @@ export type Measure = (text: string, font: string) => number;
 export const DEFAULT_FONT_STACK =
   '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif';
 
-export const TEXT_STYLES: (TextStyle & { id: string; label: string })[] = [
-  { id: "yellow", label: "醒目黄", fill: "#FFE14D", stroke: "#1A1A1A", strokeWidth: 0.1, background: null, shadow: false },
-  { id: "white", label: "白字黑边", fill: "#FFFFFF", stroke: "#1A1A1A", strokeWidth: 0.1, background: null, shadow: false },
-  { id: "red", label: "红字白边", fill: "#FF3B30", stroke: "#FFFFFF", strokeWidth: 0.1, background: null, shadow: true },
-  { id: "orange", label: "橙字白边", fill: "#FF7F00", stroke: "#FFFFFF", strokeWidth: 0.1, background: null, shadow: true },
-  { id: "pink", label: "粉字白边", fill: "#FF4F9A", stroke: "#FFFFFF", strokeWidth: 0.1, background: null, shadow: true },
-  { id: "blue", label: "蓝字白边", fill: "#0A84FF", stroke: "#FFFFFF", strokeWidth: 0.1, background: null, shadow: true },
-  { id: "tag-yellow", label: "黄底黑字", fill: "#1A1A1A", stroke: null, strokeWidth: 0.1, background: "#FFE14D", shadow: false },
-  { id: "tag-red", label: "红底白字", fill: "#FFFFFF", stroke: null, strokeWidth: 0.1, background: "#FF3B30", shadow: false },
-  { id: "tag-black", label: "黑底黄字", fill: "#FFE14D", stroke: null, strokeWidth: 0.1, background: "#1A1A1A", shadow: false },
-  { id: "shadow", label: "白字投影", fill: "#FFFFFF", stroke: null, strokeWidth: 0.1, background: null, shadow: true },
-];
+import presets from "../../src-tauri/crates/native-overlay/src/cover-styles.json";
+export const TEXT_STYLES: (TextStyle & { id: string; label: string })[] =
+  Object.entries(presets).map(([id, preset]) => ({ id, ...preset }));
+
+export interface CoverProject {
+  version: 1;
+  /** Immutable raster assets. Stored layer src values index stickers, never client URLs. */
+  background: string;
+  stickers: Record<string, string>;
+  covers: Record<Ratio, CoverElement[]>;
+  frames: Record<Ratio, Frame>;
+  syncCovers: boolean;
+}
 
 export function styleOf(style: TextStyle): TextStyle {
   const { fill, stroke, strokeWidth, background, shadow } = style;

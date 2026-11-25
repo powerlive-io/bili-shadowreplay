@@ -104,6 +104,24 @@ cargo fmt --manifest-path src-tauri/crates/native-overlay/Cargo.toml --check
 
 Tests cover parsing, cache eviction/redecode pixel stability, active indexing/backwards seeks, layout/collision semantics, actual color emoji pixels, all Unicode 16 fully-qualified emoji shaping, PNG/raw parity, allocating/reused-buffer parity and invalid buffer rejection for both formats, explicit non-gray BGRA channel order with both RGBA/BGRA surface storage, zero/partial/full alpha and straight/premultiplied rounding, translucent text/outline/shadow/image pixels, nonfatal missing glyphs, image containment/movement, path-and-rounded-size sprite sharing with exact cache counters, and opt-in profiling with PNG excluded from timings/frame counts. Assets with pinned upstream URLs, SHA-256 hashes and licenses are listed in `assets/README.md`.
 
+### Editable upload covers
+
+`cover::Project` version 1 contains the uncomposited background, raster sticker
+assets, linked layer IDs and independent 16:9 / 4:3 frames and layer stacks.
+`cover::design` lays out an AI title as an ordinary editable text layer.
+`Project::render` produces both final JPEGs on the CPU; the browser canvas is
+an interactive preview, not a dependency of unattended submission. Font
+fallback uses the render host's installed fonts, so previews on a different
+machine need not be pixel-identical.
+
+For automation, `POST /api/design_upload_cover` with the same `id`, `source`
+and `profile` as `suggest_upload_cover`. Its `data.project` is the editable
+source; `data.cover` is only a preview. Pass the project as `edit.coverProject`
+to `POST /api/save_upload_draft` (do not send `edit.covers` as well). Use the
+saved upload ID for posting. Existing drafts require their current `expectedAt`.
+Designing alone never changes an upload. A failed render/save leaves the last
+saved version intact. Legacy image-only drafts still use their original JPEG.
+
 ## Application integration tests
 
 Useful integration commands from the repository root:

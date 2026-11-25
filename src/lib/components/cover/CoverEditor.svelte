@@ -42,6 +42,7 @@
     zoomFrame,
     twinChanges,
     type CoverElement,
+    type CoverProject,
     type ElementChanges,
     type Frame,
     type Ratio,
@@ -50,9 +51,11 @@
   } from "../../cover-elements";
   import { trapFocus } from "../../focus-trap";
   import { invoke, log } from "../../invoker";
+  import { packProject } from "./project";
   import ElementToolbar from "./ElementToolbar.svelte";
   import {
     frameScheduler,
+    forgetSticker,
     isCrossOrigin,
     loadSticker,
     measure,
@@ -72,15 +75,22 @@
     video?: { file?: string; value?: number } | null;
     /** The current cover, used as the background at first. */
     image?: string;
+    project?: CoverProject | null;
     /** Shown under the previews. */
     title?: string;
     show?: boolean;
     onCoverUpdate?: (cover: { cover: string }) => void;
     /** Store the covers somewhere other than the video, such as an upload. */
-    onSave?: (covers: { cover: string; cover43: string }) => Promise<void>;
+    onSave?: (covers: { cover: string; project: CoverProject }) => Promise<void>;
   }
 
-  let { video = null, image = "", title = "", show = $bindable(false), onCoverUpdate, onSave }: Props = $props();
+  let { video = null, image = "", project = null, title = "", show = $bindable(false), onCoverUpdate, onSave }: Props = $props();
+  const initial = untrack(() => project);
+  let restoring = $state(Boolean(initial));
+  const stickerAssets = initial?.stickers ?? {};
+  const stickerSource = (key: string) => Object.prototype.hasOwnProperty.call(stickerAssets, key) ? stickerAssets[key] : key;
+  const drawable = (elements: CoverElement[]) => elements.map(e =>
+    e.kind === "sticker" ? { ...e, src: stickerSource(e.src) } : e);
 
   const RATIOS: { id: Ratio; label: string; hint: string }[] = [
     { id: "home", label: "首页推荐", hint: "4:3" },
@@ -88,9 +98,8 @@
   ];
 
   // Each cover's elements, front last, in element space; an element and its
-  // twin on the other cover share an id. Kept while the editor is hidden,
-  // so reopening after saving edits them again over the same background.
-  let covers: Record<Ratio, CoverElement[]> = $state({ home: [], wide: [] });
+  // twin on the other cover share an id. Never mutate the parent's pending draft.
+  let covers: Record<Ratio, CoverElement[]> = $state(initial ? structuredClone(initial.covers) : { home: [], wide: [] });
   let selectedId: number | null = $state(null);
   let editingId: number | null = $state(null);
   // The picture of the cover being edited is selected: zoom and move it.
@@ -111,7 +120,7 @@
   });
   // Edit text and stickers on both covers together, as Bilibili does by
   // default; each cover always frames the picture on its own.
-  let syncCovers = $state(true);
+  let syncCovers = $state(initial?.syncCovers ?? true);
 
   /** The elements of the cover being edited. */
   let elements = $derived(covers[ratio]);
@@ -140,6 +149,8 @@
   let zoomRange = $derived({ min: minZoom(scene, aspectOf(ratio)), max: MAX_ZOOM });
 
   let background: Background | null = null;
+  // Reuse the original bytes across text-only edits, not another JPEG generation.
+  let backgroundAsset = "";
   let hasBackground = $state(false);
   let backgroundKind: "cover" | "frame" | "upload" | null = $state(null);
   let originalCover = $state("");
@@ -169,6 +180,8 @@
       observer.disconnect();
       cancelRedraw();
       clearTimeout(commitTimer);
+      // The shared library cache must not retain entire private projects.
+      for (const asset of Object.values(stickerAssets)) forgetSticker(asset);
     };
   });
 
@@ -183,7 +196,7 @@
 
   $effect(() => {
     if (!show) return;
-    const cover = image;
+    const cover = initial?.background || image;
     untrack(() => {
       opened = true;
       if (cover && !originalCover) {
@@ -201,10 +214,10 @@
 
   function redraw() {
     if (!ctx) return;
-    const pending = renderCover(ctx, scene, view, background, area, elements, editingId);
+    const pending = renderCover(ctx, scene, view, background, area, drawable(elements), editingId);
     for (const r of ["home", "wide"] as const) {
       const preview = previews[r]?.getContext("2d");
-      if (preview) pending.push(...renderCover(preview, scene, viewOf(r), background, elementArea(r), covers[r]));
+      if (preview) pending.push(...renderCover(preview, scene, viewOf(r), background, elementArea(r), drawable(covers[r])));
     }
     redrawWhenLoaded(pending, scheduleRedraw);
   }
@@ -238,6 +251,7 @@
 
   function setBackground(source: CanvasImageSource, width: number, height: number, kind: typeof backgroundKind) {
     background = prepareBackground(source, width, height);
+    backgroundAsset = "";
     const next = sceneOf(width, height);
     if (Math.abs(next.width - scene.width) > 0.5) {
       scene = next;
@@ -285,8 +299,21 @@
     try {
       const image = src === originalCover && originalImage ? originalImage : await loadImage(src);
       if (src === originalCover) originalImage = image;
-      if (token === backgroundToken) setBackground(image, image.naturalWidth, image.naturalHeight, kind);
+      if (token === backgroundToken) {
+        setBackground(image, image.naturalWidth, image.naturalHeight, kind);
+        if (src === initial?.background) backgroundAsset = src;
+        if (restoring) {
+          frames = structuredClone(initial.frames);
+          history = [snapshot()];
+          restoring = false;
+        }
+      }
     } catch (error) {
+      if (restoring) {
+        alert("封面工程的背景损坏，未更改草稿");
+        close();
+        return;
+      }
       log.error("Failed to load the cover background:", String(error));
       if (src === originalCover) originalFailed = true;
       // Fall back to a frame; a video still loading picks one when ready.
@@ -679,7 +706,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!show || saving || event.defaultPrevented) return;
+    if (!show || saving || restoring || event.defaultPrevented) return;
     const target = event.target as HTMLElement | null;
     const typing = Boolean(target?.closest?.("input, textarea, select, [contenteditable]"));
     if (event.key === "Escape") {
@@ -732,7 +759,7 @@
     const output = document.createElement("canvas");
     output.width = COVER_SIZES[r].width;
     output.height = COVER_SIZES[r].height;
-    renderCover(output.getContext("2d"), scene, viewOf(r), background, elementArea(r), covers[r]);
+    renderCover(output.getContext("2d"), scene, viewOf(r), background, elementArea(r), drawable(covers[r]));
     return output.toDataURL("image/jpeg", 0.92);
   }
 
@@ -742,7 +769,7 @@
   }
 
   async function handleSave() {
-    if (saving) return;
+    if (saving || restoring) return;
     finishEditing();
     saving = true;
     try {
@@ -757,7 +784,7 @@
       const stickers = RATIOS.flatMap(({ id }) =>
         covers[id].flatMap((element) => (element.kind === "sticker" ? [{ ratio: id, element }] : [])),
       );
-      const loads = await Promise.allSettled(stickers.map(({ element }) => loadSticker(element.src)));
+      const loads = await Promise.allSettled(stickers.map(({ element }) => loadSticker(stickerSource(element.src))));
       const broken = stickers.find((_, index) => loads[index].status === "rejected");
       if (broken) {
         // It may be on the other cover only: show it there, selected.
@@ -769,7 +796,22 @@
       }
       const cover = exportCover("wide");
       if (onSave) {
-        await onSave({ cover, cover43: exportCover("home") });
+        backgroundAsset ||= backgroundKind === "upload" ? background.image.toDataURL("image/png")
+          : background.image.toDataURL("image/jpeg", 0.96);
+        const project = await packProject({
+          background: backgroundAsset,
+          covers: $state.snapshot(covers),
+          frames: $state.snapshot(frames),
+          syncCovers,
+        }, stickerAssets, async (src) => {
+          const image = await loadSticker(src);
+          const bitmap = document.createElement("canvas");
+          bitmap.width = image.naturalWidth;
+          bitmap.height = image.naturalHeight;
+          bitmap.getContext("2d").drawImage(image, 0, 0);
+          return bitmap.toDataURL("image/png");
+        });
+        await onSave({ cover, project });
       } else {
         await invoke("update_video_cover", { id: video.value, cover });
       }
@@ -818,7 +860,7 @@
     </div>
 
     <!-- Changes after the canvas is captured would be lost. -->
-    <div class="flex min-h-0 flex-1" inert={saving}>
+    <div class="flex min-h-0 flex-1" inert={saving || restoring}>
       <!-- Element kinds -->
       <nav class="flex w-[60px] shrink-0 flex-col items-center gap-1 border-r border-line bg-chrome/50 py-3" aria-label="元素">
         {#each PANELS as item (item.id)}
@@ -1163,7 +1205,7 @@
       <span class="text-[11px] text-fg-muted">保存 16:9（1920×1080）和 4:3（1440×1080）两张封面</span>
       <div class="flex gap-2">
         <button type="button" class="ui-btn" disabled={saving} onclick={handleClose}>取消</button>
-        <button type="button" class="ui-btn ui-btn-primary" disabled={saving} onclick={handleSave}>
+        <button type="button" class="ui-btn ui-btn-primary" disabled={saving || restoring} onclick={handleSave}>
           {#if saving}<Loader2 class="h-3.5 w-3.5 animate-spin" />{/if}
           完成
         </button>

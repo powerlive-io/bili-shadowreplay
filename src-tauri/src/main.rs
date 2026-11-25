@@ -721,6 +721,12 @@ fn get_migrations() -> Vec<Migration> {
             sql: database::storage::WEBDAV_SCHEMA_SQL,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 38,
+            description: "persist_upload_cover_projects",
+            sql: "ALTER TABLE uploads ADD COLUMN cover_project TEXT NOT NULL DEFAULT '';",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -816,7 +822,7 @@ mod storage_migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 37);
+        assert_eq!(version, 38);
         let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
             .fetch_one(&pool)
             .await
@@ -1359,6 +1365,7 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::upload::update_upload,
         crate::handlers::upload::update_upload_cover,
         crate::handlers::cover_ai::suggest_upload_cover,
+        crate::handlers::cover_ai::design_upload_cover,
         crate::handlers::upload::update_upload_danmu,
         crate::handlers::upload::update_upload_render_settings,
         crate::handlers::upload::delete_upload,

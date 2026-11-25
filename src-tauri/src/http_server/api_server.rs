@@ -1554,6 +1554,21 @@ async fn handler_suggest_upload_cover(
     Ok(Json(ApiResponse::success(suggestion)))
 }
 
+async fn handler_design_upload_cover(
+    state: axum::extract::State<State>,
+    Json(param): Json<SuggestUploadCoverRequest>,
+) -> Result<Json<ApiResponse<crate::handlers::cover_ai::CoverDesign>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        crate::handlers::cover_ai::design_upload_cover(
+            state.0,
+            param.id,
+            param.source,
+            param.profile,
+        )
+        .await?,
+    )))
+}
+
 async fn handler_get_cover_stickers(
     state: axum::extract::State<State>,
 ) -> Result<Json<ApiResponse<Vec<CoverSticker>>>, ApiError> {
@@ -3044,6 +3059,10 @@ pub async fn start_api_server(state: State) {
             .route("/api/create_upload", post(handler_create_upload))
             .route("/api/preview_upload", post(handler_preview_upload))
             .route("/api/save_upload_draft", post(handler_save_upload_draft))
+            .route(
+                "/api/design_upload_cover",
+                post(handler_design_upload_cover),
+            )
             .route("/api/update_upload", post(handler_update_upload))
             .route(
                 "/api/update_upload_cover",
