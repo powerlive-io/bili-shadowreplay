@@ -187,6 +187,40 @@ test("leaving the clips drops the seek waiting", () => {
   assert.deepEqual(video.seeks, []);
 });
 
+for (const waiting of [false, true]) {
+  test(`removing the last clip stops ${waiting ? "pending" : "active"} playback until explicitly restarted`, async () => {
+    const first = new FakeVideo(), clock = new FakeClock();
+    const instance = new ProjectPlayer(first, new FakeVideo(), clock);
+    const segments = [{ clipId: "a", url: "a.mp4", start: 0, end: 10, offset: 0 }];
+    instance.setSegments(segments);
+    first.loaded();
+    const play = instance.play();
+    if (!waiting) {
+      clock.loaded();
+      await play;
+      assert.equal(clock.running, true);
+    }
+    let pauses = 0;
+    instance.addEventListener("pause", () => pauses++);
+    instance.setSegments([]);
+    clock.loaded();
+    await play;
+    assert.equal(instance.paused, true);
+    assert.equal(instance.currentTime, 0);
+    assert.equal(instance.duration, 0);
+    assert.equal(clock.running, false);
+    assert.equal(pauses, 1);
+    instance.setSegments(segments);
+    assert.equal(instance.paused, true, "undoing deletion must not resume playback");
+    first.loaded();
+    const restart = instance.play();
+    clock.loaded();
+    await restart;
+    assert.equal(clock.running, true);
+    instance.dispose();
+  });
+}
+
 test("the standby element preloading does not hold the player seeking", () => {
   const [active, standby] = [new FakeVideo(), new FakeVideo()];
   const instance = new ProjectPlayer(active, standby, new FakeClock());

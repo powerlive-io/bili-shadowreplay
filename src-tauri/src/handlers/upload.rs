@@ -25,6 +25,7 @@ use crate::state_type;
 #[cfg(feature = "gui")]
 use tauri::State as TauriState;
 
+pub(crate) mod draft;
 pub(crate) mod source;
 
 /// A file the static server serves under `base` (`output` or `cache`).
@@ -269,6 +270,37 @@ pub async fn create_upload(
     profile: serde_json::Value,
 ) -> Result<UploadView, String> {
     let source_operation = source::source_operation().await;
+    let row = new_upload(&state, source, source_id, file, profile).await?;
+    let mut upload = source::save_draft(
+        state.db.clone(),
+        state.temp_storage.clone(),
+        output_dir(&state).await,
+        row,
+        source_operation.clone(),
+    )
+    .await?;
+    if upload.source == "file" {
+        match capture_file_cover(&state, &upload).await {
+            Ok(cover) => {
+                state
+                    .db
+                    .set_upload_cover(upload.id, &cover, "", &upload.updated_at)
+                    .await?;
+                upload.cover = cover;
+            }
+            Err(e) => log::warn!("Failed to capture the cover of {}: {e}", upload.file),
+        }
+    }
+    Ok(upload_view(&state, upload).await)
+}
+
+async fn new_upload(
+    state: &State,
+    source: String,
+    source_id: i64,
+    file: String,
+    profile: serde_json::Value,
+) -> Result<UploadRow, String> {
     let (source_id, file, room_id) = match source.as_str() {
         "material" => {
             let material = state
@@ -295,44 +327,24 @@ pub async fn create_upload(
         _ => return Err(format!("未知的投稿来源: {source}")),
     };
     let now = Local::now().to_rfc3339();
-    let mut upload = source::save_draft(
-        state.db.clone(),
-        state.temp_storage.clone(),
-        output_dir(&state).await,
-        UploadRow {
-            id: 0,
-            source,
-            source_id,
-            file,
-            room_id,
-            uid: String::new(),
-            cover: String::new(),
-            cover43: String::new(),
-            profile: profile.to_string(),
-            danmu: false,
-            render_settings_json: "{}".to_string(),
-            status: "draft".to_string(),
-            message: String::new(),
-            bvid: String::new(),
-            created_at: now.clone(),
-            updated_at: now,
-        },
-        source_operation.clone(),
-    )
-    .await?;
-    if upload.source == "file" {
-        match capture_file_cover(&state, &upload).await {
-            Ok(cover) => {
-                state
-                    .db
-                    .set_upload_cover(upload.id, &cover, "", &upload.updated_at)
-                    .await?;
-                upload.cover = cover;
-            }
-            Err(e) => log::warn!("Failed to capture the cover of {}: {e}", upload.file),
-        }
-    }
-    Ok(upload_view(&state, upload).await)
+    Ok(UploadRow {
+        id: 0,
+        source,
+        source_id,
+        file,
+        room_id,
+        uid: String::new(),
+        cover: String::new(),
+        cover43: String::new(),
+        profile: profile.to_string(),
+        danmu: false,
+        render_settings_json: "{}".to_string(),
+        status: "draft".to_string(),
+        message: String::new(),
+        bvid: String::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
 }
 
 /// Save the draft's account and upload form over `base_uid` and
@@ -360,7 +372,7 @@ pub async fn update_upload(
     match state.db.get_upload(id).await {
         Ok(upload) => Err(ensure_editable(&upload)
             .err()
-            .unwrap_or_else(|| "投稿已在其他窗口修改，已载入最新内容".to_string())),
+            .unwrap_or_else(|| "投稿已在其他窗口修改，未覆盖最新内容".to_string())),
         Err(_) => Err("投稿已被删除".to_string()),
     }
 }

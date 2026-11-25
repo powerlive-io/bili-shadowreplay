@@ -76,6 +76,59 @@ pub(super) fn insert_upload(upload: &UploadRow) -> Query<'_, Sqlite, SqliteArgum
 }
 
 impl Database {
+    /// Reserve the row inside an uncommitted transaction. The caller uses its
+    /// ID for new cover files; nothing is published until those files are ready.
+    pub(crate) async fn begin_upload_edit(
+        &self,
+        row: &UploadRow,
+        expected_at: Option<&str>,
+        project: Option<(&str, &str)>,
+    ) -> Result<(sqlx::Transaction<'_, Sqlite>, i64), String> {
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::from)?;
+        let id = if row.id == 0 {
+            insert_upload(row)
+                .execute(&mut *tx)
+                .await
+                .map_err(DatabaseError::from)?
+                .last_insert_rowid()
+        } else {
+            let updated = sqlx::query(&format!(
+                "UPDATE uploads SET uid=?,profile=?,danmu=?,render_settings_json=?,updated_at=?
+                 WHERE id=? AND updated_at=? AND {EDITABLE}"
+            ))
+            .bind(&row.uid)
+            .bind(&row.profile)
+            .bind(row.danmu)
+            .bind(&row.render_settings_json)
+            .bind(&row.updated_at)
+            .bind(row.id)
+            .bind(expected_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::from)?;
+            if updated.rows_affected() != 1 {
+                return Err("投稿已在其他窗口修改，请重新打开草稿。".into());
+            }
+            row.id
+        };
+        if let Some((base, next)) = project {
+            let result = sqlx::query(
+                "UPDATE projects SET timeline=?,updated_at=? WHERE id=? AND timeline=?",
+            )
+            .bind(next)
+            .bind(&row.updated_at)
+            .bind(row.source_id)
+            .bind(base)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::from)?;
+            if result.rows_affected() != 1 {
+                return Err("切片已发生变化，请重试。".into());
+            }
+        }
+        Ok((tx, id))
+    }
+
     pub async fn get_uploads(&self) -> Result<Vec<UploadRow>, DatabaseError> {
         Ok(
             sqlx::query_as::<_, UploadRow>("SELECT * FROM uploads ORDER BY updated_at DESC;")

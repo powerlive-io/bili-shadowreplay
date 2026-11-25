@@ -1509,6 +1509,38 @@ async fn handler_update_upload_cover(
 #[serde(rename_all = "camelCase")]
 struct SuggestUploadCoverRequest {
     id: i64,
+    source: Option<crate::handlers::upload::draft::DraftSource>,
+    profile: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct PreviewUploadRequest {
+    source: crate::handlers::upload::draft::DraftSource,
+    profile: serde_json::Value,
+}
+
+async fn handler_preview_upload(
+    state: axum::extract::State<State>,
+    Json(param): Json<PreviewUploadRequest>,
+) -> Result<Json<ApiResponse<UploadView>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        crate::handlers::upload::draft::preview_upload(state.0, param.source, param.profile)
+            .await?,
+    )))
+}
+
+#[derive(Deserialize)]
+struct SaveDraftRequest {
+    edit: crate::handlers::upload::draft::DraftEdit,
+}
+
+async fn handler_save_upload_draft(
+    state: axum::extract::State<State>,
+    Json(param): Json<SaveDraftRequest>,
+) -> Result<Json<ApiResponse<UploadView>>, ApiError> {
+    Ok(Json(ApiResponse::success(
+        crate::handlers::upload::draft::save_upload_draft(state.0, param.edit).await?,
+    )))
 }
 
 // HTTP twin of the `suggest_upload_cover` Tauri command: the web/Docker
@@ -1518,7 +1550,7 @@ async fn handler_suggest_upload_cover(
     state: axum::extract::State<State>,
     Json(param): Json<SuggestUploadCoverRequest>,
 ) -> Result<Json<ApiResponse<CoverSuggestion>>, ApiError> {
-    let suggestion = suggest_upload_cover(state.0, param.id).await?;
+    let suggestion = suggest_upload_cover(state.0, param.id, param.source, param.profile).await?;
     Ok(Json(ApiResponse::success(suggestion)))
 }
 
@@ -3010,6 +3042,8 @@ pub async fn start_api_server(state: State) {
             .route("/api/delete_project", post(handler_delete_project))
             .route("/api/export_project", post(handler_export_project))
             .route("/api/create_upload", post(handler_create_upload))
+            .route("/api/preview_upload", post(handler_preview_upload))
+            .route("/api/save_upload_draft", post(handler_save_upload_draft))
             .route("/api/update_upload", post(handler_update_upload))
             .route(
                 "/api/update_upload_cover",

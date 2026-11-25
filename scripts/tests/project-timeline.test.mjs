@@ -155,15 +155,27 @@ test("the backend's edits of the saved timeline are merged into unsaved local ed
   assert.deepEqual(merged.subtitles.map((s) => s.id), ["s1", "r1"]);
 });
 
-test("local subtitle edits win over the backend's and nothing changes without its edits", () => {
+test("competing subtitle additions keep the draft and refuse a silent overwrite", () => {
   const base = timeline([clip("a", 1, 0, 10)]);
   const remote = timeline([clip("a", 1, 0, 10)], [sub("r1", "a", 1, 2)]);
-  // Subtitles typed locally meanwhile are kept rather than mixed with recognized ones.
   const typed = timeline([clip("a", 1, 0, 10)], [sub("mine", "a", 3, 4)]);
-  assert.deepEqual(plain(api.mergeRemoteTimeline(typed, base, remote).subtitles).map((s) => s.id), ["mine"]);
+  assert.throws(() => api.mergeRemoteTimeline(typed, base, remote), /字幕已在其他窗口修改/);
+  assert.equal(typed.subtitles[0].id, "mine");
   // Subtitles the editor already knew about and deleted stay deleted.
   const cleared = timeline([clip("a", 1, 0, 10)]);
   assert.equal(api.mergeRemoteTimeline(cleared, remote, remote), cleared);
+});
+
+test("a remote cue edit or deletion survives a local trim, but conflicting edits are rejected", () => {
+  const base = timeline([clip("a", 1, 0, 10)], [sub("s", "a", 1, 2, "old")]);
+  const trimmed = api.trimClip(base, "a", "end", 8, 10, 30);
+  const corrected = api.updateSubtitleText(base, "s", "corrected");
+  for (const remote of [corrected, api.removeSubtitle(base, "s")]) {
+    const merged = api.mergeRemoteTimeline(trimmed, base, remote);
+    assert.equal(merged.clips[0].end, 8);
+    assert.deepEqual(plain(merged.subtitles), plain(remote.subtitles));
+    assert.throws(() => api.mergeRemoteTimeline(api.updateSubtitleText(trimmed, "s", "mine"), base, remote));
+  }
 });
 
 test("a subtitle drag keeps subtitles merged in while dragging, also when undone", () => {

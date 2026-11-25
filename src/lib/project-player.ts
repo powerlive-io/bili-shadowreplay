@@ -291,6 +291,8 @@ export class ProjectPlayer extends EventTarget implements MediaClock {
     const index = this.segmentAt(target);
     this.index = index;
     if (index < 0) {
+      // Stop the clock and invalidate any play still waiting for media.
+      this.pause();
       this.queued.clear();
       let ended = false;
       for (const element of this.elements) {

@@ -356,8 +356,8 @@ export function removeClip(timeline: ProjectTimeline, clipId: string): ProjectTi
  * Between `base`, the saved timeline the editor last knew, and `remote`, the
  * saved one now, the backend may switch danmaku, remove the clips, video
  * overlays and sounds of a deleted material, remove the sounds of a deleted
- * file of the audio library and fill clips that had none with recognized
- * subtitles; everything else stays as edited in `local`. Returns `local`
+ * file of the audio library and update a clip's subtitles. Conflicting cue
+ * lists are rejected instead of losing either window's edits. Returns `local`
  * itself when nothing applies.
  */
 export function mergeRemoteTimeline(
@@ -401,15 +401,35 @@ export function mergeRemoteTimeline(
     };
   }
 
-  const hadSubtitles = new Set(base.subtitles.map((subtitle) => subtitle.clip_id));
-  const hasSubtitles = new Set(next.subtitles.map((subtitle) => subtitle.clip_id));
-  const clipIds = new Set(next.clips.map((clip) => clip.id));
-  const filled = remote.subtitles.filter(
-    (subtitle) =>
-      clipIds.has(subtitle.clip_id) && !hadSubtitles.has(subtitle.clip_id) && !hasSubtitles.has(subtitle.clip_id),
-  );
-  if (filled.length > 0) next = { ...next, subtitles: [...next.subtitles, ...filled] };
+  // Merge each clip's cue list as one edit (including removals and timing).
+  const before = subtitlesByClip(base), ours = subtitlesByClip(next), theirs = subtitlesByClip(remote);
+  const replace = new Set<string>();
+  for (const clip of next.clips) {
+    const original = before.get(clip.id) ?? [], localCues = ours.get(clip.id) ?? [], saved = theirs.get(clip.id) ?? [];
+    if (sameCues(original, saved) || sameCues(localCues, saved)) continue;
+    if (!sameCues(original, localCues)) throw new Error("同一片段的字幕已在其他窗口修改。请先复制本地字幕，再撤销冲突编辑或重新载入切片。");
+    replace.add(clip.id);
+  }
+  if (replace.size) next = { ...next, subtitles: [
+    ...next.subtitles.filter((cue) => !replace.has(cue.clip_id)),
+    ...remote.subtitles.filter((cue) => replace.has(cue.clip_id)),
+  ] };
   return next;
+}
+
+function subtitlesByClip(timeline: ProjectTimeline) {
+  const result = new Map<string, TimelineSubtitle[]>();
+  for (const cue of timeline.subtitles) {
+    const group = result.get(cue.clip_id);
+    if (group) group.push(cue);
+    else result.set(cue.clip_id, [cue]);
+  }
+  return result;
+}
+
+function sameCues(a: TimelineSubtitle[], b: TimelineSubtitle[]) {
+  return a.length === b.length && a.every((cue, i) =>
+    cue.id === b[i].id && cue.start === b[i].start && cue.end === b[i].end && cue.text === b[i].text);
 }
 
 /**

@@ -18,7 +18,7 @@ const code = ts.transpileModule(handlers.map((node) => node.getText(parsed)).joi
 function fixture() {
   const alerts = [];
   const state = vm.createContext({
-    saveTimer: null, saving: null, saveState: "pending", resolutionSaving: null,
+    saveTimer: null, saving: null, saveState: "pending", saveError: "", resolutionSaving: null,
     timeline: { clips: [] }, syncedTimeline: "{}", parseTimeline: JSON.parse,
     projectId: 1, project: { title: "old" }, title: "new", titleBase: "old", latestTitle: "old",
     titleSaving: null, titleWrites: 0, projectRefresh: { schedule() {} },

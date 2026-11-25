@@ -244,6 +244,7 @@
   let uploadDraft: UploadItem | null = $state(null);
   let uploadAccountList: { uid: string; name: string }[] = $state([]);
   let saveState: "saved" | "pending" | "saving" | "error" = $state("saved");
+  let saveError = $state("");
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saving: Promise<void> | null = null;
   // The saved timeline as last seen, to tell the backend's edits from local ones.
@@ -511,8 +512,9 @@
     project = view;
     if (!base && view.timeline === syncedTimeline) return false;
     const from = base ?? parseTimeline(syncedTimeline);
-    syncedTimeline = view.timeline;
     const merged = mergeRemoteTimeline(timeline, from, parseTimeline(view.timeline));
+    // A conflicting refresh must not advance the base of the next save.
+    syncedTimeline = view.timeline;
     // Clips that left can leave overlays on a track running into each other;
     // lifting them apart is saved like any edit, as is putting clips the
     // backend made on frames.
@@ -548,8 +550,10 @@
     // A save in flight brings back its own result; read what it left.
     while (saving) await saving;
     const writes = titleWrites;
+    const readBase = syncedTimeline;
     const view = await invoke<ProjectItem>("get_project", { id: projectId });
-    if (applyProjectView(view)) scheduleSave();
+    if (saving || readBase !== syncedTimeline) projectRefresh.schedule();
+    else if (applyProjectView(view)) scheduleSave();
     // Don't apply a snapshot taken before our own rename committed.
     if (titleSaving || writes !== titleWrites) {
       if (titleSaving) await titleSaving.catch(() => {});
@@ -729,6 +733,7 @@
       saveState = editedMeanwhile || unsaved ? "pending" : "saved";
     } catch (error) {
       saveState = "error";
+      saveError = String(error);
       throw error;
     }
   }
@@ -1680,6 +1685,7 @@
     showExportSettings = false;
     // Texts and stickers are burned as drawn here, from the timeline exported.
     const exported = timeline;
+    const exportedBase = parseTimeline(syncedTimeline);
     let overlayImages: OverlayImage[];
     try {
       overlayImages = await renderOverlayImages(exported, stickerRefUrl);
@@ -1745,7 +1751,7 @@
         subtitleAss: exportedSubtitles ? exportedAss : null,
         overlays: overlayImages,
         target,
-        base: parseTimeline(syncedTimeline),
+        base: exportedBase,
       });
       openTaskCenter(eventId);
       settle();
@@ -1796,7 +1802,7 @@
   // Follow the open draft as it posts and as the project changes under it.
   const uploadRefresh = createStateRefresh(async () => {
     const id = uploadDraft?.id;
-    if (id === undefined) return;
+    if (!id) return; // An unsaved upload preview has no database row yet.
     const fresh = await invoke<UploadItem>("get_upload", { id });
     // Closed, or another draft opened, while it loaded.
     if (uploadDraft?.id === id) uploadDraft = fresh;
@@ -1907,7 +1913,7 @@
       {:else if saveState === "saved"}
         已保存
       {:else if saveState === "error"}
-        保存失败
+        <span title={saveError}>保存失败</span>
         <button type="button" onclick={autosaveTimeline}>重试</button>
       {:else}
         保存中…

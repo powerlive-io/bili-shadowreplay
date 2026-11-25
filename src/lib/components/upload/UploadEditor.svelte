@@ -2,18 +2,24 @@
   import {
     AlertCircle,
     CheckCircle2,
+    ChevronDown,
     Clapperboard,
     ExternalLink,
     FileVideo,
     Film,
+    Image as Picture,
     ListChecks,
     Loader2,
     Pen,
+    SlidersHorizontal,
     Sparkles,
     Upload,
     X,
   } from "lucide-svelte";
-  import { onDestroy, untrack } from "svelte";
+  import { tick, untrack } from "svelte";
+  import { mountToViewport } from "../../actions/mountToViewport";
+  import { pageVisibility } from "../../page-visibility";
+  import BilibiliIcon from "../BilibiliIcon.svelte";
   import { trapFocus } from "../../focus-trap";
   import { get_static_url, invoke } from "../../invoker";
   import {
@@ -51,17 +57,19 @@
   }
 
   let { upload, accounts, onChanged, onClose }: Props = $props();
+  const pageVisible = pageVisibility();
 
-  // Edited locally and saved shortly after each change; the editor is
-  // recreated for each upload. Another window can edit the same draft, so
-  // each save is made over `base`, the stored account and form the local
-  // ones came from, and the backend refuses it once the other saved since.
-  const initial = () => ({ uid: upload.uid, profile: upload.profile });
-  let base = initial();
-  let profile = $state(parseProfile(base.profile));
-  let uid = $state(base.uid);
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let saving: Promise<void> | null = null;
+  // An id of zero is a source preview, never a persisted draft.
+  let base = $state.raw(untrack(() => upload));
+  let profile = $state(untrack(() => parseProfile(base.profile)));
+  let fallbackTid: number | undefined = $state();
+  let uid = $state(untrack(() => base.uid));
+  let danmu = $state(untrack(() => base.danmu));
+  let renderSettings = $state(untrack(() => ({ ...(base.render_settings ?? defaultRenderSettings()) })));
+  type Covers = { cover: string; cover43: string };
+  let covers: Covers | null = $state.raw(null);
+  let saving = $state(false);
+  let confirmClose = $state(false);
   let saveError = $state("");
   let posting = $state(false);
   let generatingCover = $state(false);
@@ -77,16 +85,15 @@
   let closeButton: HTMLButtonElement | undefined = $state();
 
   let editable = $derived(isUploadEditable(upload));
-  let savingDanmu = $state(false);
-  let savingRenderSettings = $state(false);
-  let renderSettings = $state(defaultRenderSettings());
-  $effect(() => {
-    const settings = upload.render_settings;
-    if (!savingRenderSettings) renderSettings = { ...(settings ?? defaultRenderSettings()) };
-  });
+  let busy = $derived(saving || posting);
+  let originalProfile = $derived(parseProfile(base.profile));
+  let originalSettings = $derived(base.render_settings ?? defaultRenderSettings());
+  let settingsChanged = $derived(JSON.stringify(renderSettings) !== JSON.stringify(originalSettings));
+  let dirty = $derived(uid !== base.uid || JSON.stringify(profile) !== JSON.stringify(originalProfile)
+    || danmu !== base.danmu || settingsChanged || covers !== null);
   // Turning it off stays possible even when there is nothing to burn.
   let canToggleDanmu = $derived(
-    editable && !posting && (upload.danmu_available || upload.danmu) && !savingDanmu,
+    editable && !busy && (upload.danmu_available || danmu),
   );
   let active = $derived(isUploadActive(upload));
   let blocker = $derived(
@@ -101,16 +108,22 @@
   let SourceIcon = $derived(
     upload.source === "material" ? Film : upload.source === "project" ? Clapperboard : FileVideo,
   );
+  let description = $derived(sourceDescription({
+    ...upload, danmu,
+    source_state: upload.source === "material" && upload.source_state !== "missing"
+      ? (danmu && upload.danmu_available ? "render" : "material") : upload.source_state,
+  }));
 
   $effect(() => {
-    const cover = upload.display_cover;
+    const cover = covers?.cover ?? base.display_cover;
     coverFailed = false;
-    if (!cover) {
-      coverUrl = "";
+    if (!cover || cover.startsWith("data:image/jpeg;base64,")) {
+      coverUrl = cover || "";
       return;
     }
-    // Each saved cover is a new file, so its URL changes with it.
-    void get_static_url("output", cover).then((url) => (coverUrl = url));
+    let current = true;
+    void get_static_url("output", cover).then((url) => { if (current) coverUrl = url; });
+    return () => { current = false; };
   });
 
   $effect(() => {
@@ -122,124 +135,81 @@
     void get_static_url(video.base, video.path).then((url) => (videoUrl = url));
   });
 
-  // Take up a form saved in another window as it arrives.
+  // Refresh clean editors, never replace an uncommitted edit (including a cover).
   $effect(() => {
-    void upload.uid;
-    void upload.profile;
-    untrack(adopt);
+    const remote = upload;
+    untrack(() => {
+      if (remote.id && !dirty && !busy && !showCoverEditor && !generatingCover) adopt(remote);
+    });
   });
 
-  onDestroy(() => {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save().catch(() => {});
-    }
-  });
-
-  /** Show the account and form as stored, unless edits here are unsaved. */
-  function adopt() {
-    if (saveTimer || saving) return;
-    if (upload.uid === base.uid && upload.profile === base.profile) return;
-    base = { uid: upload.uid, profile: upload.profile };
-    profile = parseProfile(base.profile);
-    uid = base.uid;
+  function adopt(item: UploadItem) {
+    base = item;
+    uid = item.uid;
+    profile = parseProfile(item.profile);
+    danmu = item.danmu;
+    renderSettings = { ...(item.render_settings ?? defaultRenderSettings()) };
+    covers = null;
   }
 
-  /** Save the form, after any save already in flight so the newest lands last. */
-  async function save() {
-    saveTimer = null;
-    while (saving) await saving;
-    const snapshot = { uid, profile: $state.snapshot(profile) };
-    const request = invoke<string>("update_upload", {
-      id: upload.id,
-      ...snapshot,
-      baseUid: base.uid,
-      baseProfile: base.profile,
-    });
-    saving = request.then(
-      () => {},
-      () => {},
-    );
-    let stored: string;
+  function draftSource() {
+    return { source: base.source, sourceId: base.source_id, file: base.file };
+  }
+
+  async function persist() {
+    const snapshot = $state.snapshot(profile);
+    snapshot.tid = fallbackTid ?? snapshot.tid;
+    const stored = await invoke<UploadItem>("save_upload_draft", { edit: {
+      id: base.id, source: base.id ? null : draftSource(), expectedAt: base.updated_at,
+      uid, profile: snapshot,
+      danmu: danmu !== base.danmu ? { base: base.danmu, value: danmu } : null,
+      renderSettings: settingsChanged ? { base: originalSettings, value: $state.snapshot(renderSettings) } : null,
+      covers: covers ?? (!base.id && base.display_cover?.startsWith("data:image/jpeg;base64,")
+        ? { cover: base.display_cover } : null),
+    } });
+    adopt(stored);
     try {
-      stored = await request;
+      saveRoomTemplate(stored.room_id, snapshot);
     } catch (error) {
-      saving = null;
-      saveError = String(error);
-      // Refused as saved in another window: show what it saved instead.
-      void onChanged().then(adopt, () => {});
-      throw error;
+      console.warn("草稿已保存，但无法缓存房间投稿模板：", error);
     }
-    saving = null;
-    base = { uid: snapshot.uid, profile: stored };
-    saveError = "";
-    saveRoomTemplate(upload.room_id, snapshot.profile);
+    return stored.id;
   }
 
   function setTags(tags: string[]) {
     profile.tag = tags.join(",");
-    scheduleSave();
   }
 
-  function scheduleSave() {
-    if (!editable) return;
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void save().catch(() => {}), 600);
-  }
-
-  // Saved at once on its own: a project shares it with its editor, so the
-  // debounced form save must not carry a stale value.
-  async function setDanmu(input: HTMLInputElement) {
-    savingDanmu = true;
+  async function saveDraft() {
+    if (!editable || busy || generatingCover) return;
+    saving = true;
+    confirmClose = false;
+    saveError = "";
     try {
-      await invoke("update_upload_danmu", { id: upload.id, danmu: input.checked });
-      await onChanged();
+      await persist();
+      onClose();
+      void onChanged().catch(console.error);
     } catch (error) {
-      input.checked = upload.danmu;
-      alert("修改弹幕设置失败：" + error);
+      saveError = String(error).replace(/^.*?Failed to invoke save_upload_draft:\s*(?:Error:\s*)?/s, "");
     } finally {
-      savingDanmu = false;
+      saving = false;
     }
   }
 
-  async function saveRenderSettings() {
-    if (!editable || posting || savingRenderSettings) return;
-    savingRenderSettings = true;
-    try {
-      await invoke("update_upload_render_settings", {
-        id: upload.id,
-        renderSettings: $state.snapshot(renderSettings),
-      });
-      await onChanged();
-    } catch (error) {
-      alert("修改压制设置失败：" + error);
-    } finally {
-      savingRenderSettings = false;
-    }
-  }
-
-  async function saveCover(covers: { cover: string; cover43: string }) {
-    await invoke("update_upload_cover", { id: upload.id, ...covers });
-    // The previous file is gone; show the new one now.
-    await onChanged();
+  async function saveCover(images: Covers) {
+    covers = images;
   }
 
   /** AI 挑一帧画面并排上标题，生成即替换当前封面；不满意可再手动编辑。 */
   async function generateCover() {
     const title = profile.title.trim();
-    if (!editable || posting || generatingCover || !title) return;
+    if (!editable || busy || generatingCover || !title) return;
     generatingCover = true;
     try {
-      // The suggestion reads the saved profile: land pending edits first,
-      // as `post` does, or the model sees stale title, desc and tags from
-      // before the 600 ms autosave fired.
-      if (saveTimer) clearTimeout(saveTimer);
-      await save();
-      const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", { id: upload.id });
-      const covers = await renderAutoCover(suggestion, title);
-      await invoke("update_upload_cover", { id: upload.id, ...covers });
-      // The previous file is gone; show the new one now.
-      await onChanged();
+      const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", {
+        id: base.id, source: base.id ? null : draftSource(), profile: $state.snapshot(profile),
+      });
+      covers = await renderAutoCover(suggestion, title);
       // The AI cover replaced the file underneath the manual editor: bump
       // the key so reopening rebuilds it from the new picture instead of
       // keeping the pre-AI composition that would overwrite the result.
@@ -257,14 +227,12 @@
   async function post() {
     // Not while a cover generation runs: it saves its cover after the
     // upload is claimed, which is refused, so the old cover would publish.
-    if (!editable || blocker || posting || savingDanmu || savingRenderSettings || generatingCover)
+    if (!editable || blocker || busy || generatingCover)
       return;
     posting = true;
     const eventId = generateEventId();
     try {
-      // Waits for saves in flight: none may land once it is posting.
-      if (saveTimer) clearTimeout(saveTimer);
-      await save();
+      const id = await persist();
       // A project's video is rendered when posting, with its subtitles and
       // its texts and stickers as its editor draws them.
       let subtitleAss: string | null = null;
@@ -288,12 +256,12 @@
       announceTask({
         id: eventId,
         task_type: "upload",
-        metadata: JSON.stringify({ upload_id: upload.id, title: profile.title }),
+        metadata: JSON.stringify({ upload_id: id, title: profile.title }),
       });
-      await invoke("post_upload", { eventId, id: upload.id, subtitleAss, overlays });
+      await invoke("post_upload", { eventId, id, subtitleAss, overlays });
       openTaskCenter(eventId);
-      // Show the attempt as running before allowing another click.
-      await onChanged();
+      onClose();
+      void onChanged().catch(console.error);
     } catch (error) {
       alert("投稿失败：" + (error instanceof Error ? error.message : error));
     } finally {
@@ -303,41 +271,53 @@
   }
 
   function close() {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save().catch(() => {});
-    }
-    onClose();
+    if (busy || generatingCover) return;
+    if (dirty) confirmClose = true;
+    else onClose();
+  }
+
+  async function continueEditing() {
+    confirmClose = false;
+    await tick();
+    closeButton?.focus();
   }
 </script>
 
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === "Escape" && !showCoverEditor) {
+    if (pageVisible() && event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !showCoverEditor) {
       event.preventDefault();
-      close();
+      if (confirmClose) void continueEditing();
+      else {
+        // Commit the tag input's pending text before checking for edits.
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        close();
+      }
     }
   }}
 />
 
 <!-- Above full-window editors such as the clip editor (z-1000). -->
-<div class="ui-modal-backdrop z-[1100]">
+<div use:mountToViewport hidden={!pageVisible()} inert={!pageVisible()}>
+<div class="ui-modal-backdrop z-[1100] p-2 sm:p-5">
   <div
-    use:trapFocus={{ initial: () => (editable ? titleInput : closeButton) }}
-    class="ui-modal max-h-[90vh] w-[820px] max-w-full"
+    use:trapFocus={{ active: pageVisible(), initial: () => (editable ? titleInput : closeButton) }}
+    class="ui-modal upload-sheet"
     role="dialog"
     aria-modal="true"
     aria-labelledby="upload-editor-title"
   >
-    <div class="ui-modal-header">
-      <h3 id="upload-editor-title" class="flex min-w-0 items-center gap-2">
-        <Upload class="h-4 w-4 shrink-0 text-accent-fg" />
-        <span class="truncate">{editable ? "编辑投稿" : "投稿详情"}</span>
+    <div class="sheet-head" inert={confirmClose}>
+      <h3 id="upload-editor-title">
+        <BilibiliIcon class="h-6 w-6 text-accent-fg" />
+        {editable ? "视频投稿" : "投稿详情"}
       </h3>
+      {#if editable && dirty}<span class="draft-marker">未保存</span>{/if}
       <button
         type="button"
-        class="ui-btn ui-btn-sm ui-btn-icon ui-btn-ghost -mr-1.5"
+        class="ui-btn ui-btn-icon ui-btn-ghost ml-auto"
         aria-label="关闭"
+        disabled={busy || generatingCover}
         bind:this={closeButton}
         onclick={close}
       >
@@ -345,7 +325,7 @@
       </button>
     </div>
 
-    <div class="ui-modal-body custom-scrollbar-light space-y-4">
+    <div class="min-h-0 overflow-y-auto custom-scrollbar-light" inert={confirmClose}>
       {#if upload.status === "posted"}
         <div class="flex items-center gap-2.5 rounded-[10px] border border-success/40 bg-success-soft px-3.5 py-2.5 text-[12px] text-success-fg">
           <CheckCircle2 class="h-4 w-4 shrink-0" />
@@ -378,65 +358,52 @@
         </div>
       {/if}
 
-      <div class="grid grid-cols-[280px_minmax(0,1fr)] gap-5">
-        <div class="space-y-4">
-          <section class="space-y-2">
-            <div class="flex items-center justify-between">
-              <span class="ui-label">视频封面</span>
-              {#if editable}
-                <div class="flex gap-1.5">
-                  <button
-                    type="button"
-                    class="ui-btn ui-btn-sm"
-                    disabled={posting || generatingCover || !profile.title.trim()}
-                    title={profile.title.trim() ? "AI 挑选画面并排上标题" : "先填写标题再生成封面"}
-                    onclick={generateCover}
-                  >
-                    {#if generatingCover}
-                      <Loader2 class="h-3 w-3 animate-spin" />
-                    {:else}
-                      <Sparkles class="h-3 w-3" />
-                    {/if}
-                    {generatingCover ? "生成中…" : "AI 生成封面"}
-                  </button>
-                  <button
-                    type="button"
-                    class="ui-btn ui-btn-sm"
-                    disabled={posting || generatingCover}
-                    title={generatingCover ? "AI 封面生成中，完成后再手动编辑" : undefined}
-                    onclick={() => (showCoverEditor = true)}
-                  >
-                    <Pen class="h-3 w-3" />
-                    编辑封面
-                  </button>
+      <div class="sheet-columns">
+        <aside class="media-column" aria-label="视频来源与封面">
+          <section>
+            <h4 class="field-label">视频封面</h4>
+            <div class="cover-frame">
+              {#if coverUrl && !coverFailed}
+                <img src={coverUrl} alt="视频封面" onerror={() => (coverFailed = true)} />
+              {:else}
+                <div class="empty-frame">
+                  <Picture size={28} strokeWidth={1.3} />
+                  <span>尚未设置封面</span>
                 </div>
               {/if}
             </div>
-            <div class="aspect-video overflow-hidden rounded-[10px] border border-line bg-sunken">
-              {#if coverUrl && !coverFailed}
-                <img src={coverUrl} alt="视频封面" class="h-full w-full object-cover" onerror={() => (coverFailed = true)} />
-              {:else}
-                <div class="flex h-full items-center justify-center text-[11px] text-fg-faint">暂无封面</div>
-              {/if}
-            </div>
+            {#if editable}
+              <div class="cover-tools">
+                <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost"
+                  disabled={busy || generatingCover} onclick={() => (showCoverEditor = true)}>
+                  <Pen size={13} /> 编辑封面
+                </button>
+                <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost"
+                  disabled={busy || generatingCover || !profile.title.trim()}
+                  title={profile.title.trim() ? "AI 挑选画面并排上标题" : "先填写标题再生成封面"}
+                  onclick={generateCover}>
+                  {#if generatingCover}
+                    <Loader2 class="h-3 w-3 animate-spin" />
+                  {:else}
+                    <Sparkles class="h-3 w-3" />
+                  {/if}
+                  {generatingCover ? "生成中…" : "AI 生成封面"}
+                </button>
+              </div>
+            {/if}
           </section>
 
-          <section class="space-y-2">
-            <span class="ui-label">投稿来源</span>
-            <div class="ui-card space-y-2 bg-control/50 p-3">
-              <div class="flex min-w-0 items-center gap-2">
-                <SourceIcon class="h-4 w-4 shrink-0 text-fg-muted" />
-                <span class="ui-badge">{sourceLabels[upload.source]}</span>
-                <span class="min-w-0 truncate text-[12px] font-medium text-fg" title={upload.source_title}>
-                  {upload.source_title || "已删除"}
-                </span>
-              </div>
-              {#if upload.source === "file"}
-                <p class="break-all font-mono text-[11px] text-fg-muted">{upload.file}</p>
-              {/if}
-              <p class="text-[11px] leading-relaxed {upload.source_state === 'missing' ? 'text-danger-fg' : 'text-fg-muted'}">
-                {sourceDescription(upload)}
-              </p>
+          <section class="source-block">
+            <h4 class="field-label"><SourceIcon size={15} />{sourceLabels[upload.source]}来源</h4>
+            <p class="break-words text-sm font-semibold" title={upload.source_title}>
+              {upload.source_title || "已删除"}
+            </p>
+            {#if upload.source === "file" && upload.file !== upload.source_title}
+              <p class="break-all font-mono text-[11px] text-fg-muted">{upload.file}</p>
+            {/if}
+            <p class="text-[11px] leading-relaxed {upload.source_state === 'missing' ? 'text-danger-fg' : 'text-fg-muted'}">
+              {description}
+            </p>
               {#if upload.source !== "file" && upload.source_state !== "missing" && !upload.danmu_embedded}
                 <label
                   class="flex items-start justify-between gap-3 border-t border-line pt-2.5 {canToggleDanmu
@@ -458,99 +425,104 @@
                   <span class="ui-switch mt-0.5">
                     <input
                       type="checkbox"
-                      checked={upload.danmu}
+                      bind:checked={danmu}
                       disabled={!canToggleDanmu}
-                      onchange={(event) => setDanmu(event.currentTarget)}
                     />
                     <span></span>
                   </span>
                 </label>
               {/if}
-            </div>
           </section>
-          {#if (upload.source === "project" || (upload.source === "material" && upload.danmu && upload.danmu_available)) && upload.source_state !== "missing"}
-            <section class="space-y-2">
-              <span class="ui-label">画质、分辨率与码率</span>
-              <div class="ui-card space-y-2 bg-control/50 p-3">
+          {#if (upload.source === "project" || (upload.source === "material" && danmu && upload.danmu_available)) && upload.source_state !== "missing"}
+            <details class="media-options">
+              <summary><SlidersHorizontal size={14} />压制设置 <ChevronDown class="disclosure-arrow" size={14} /></summary>
+              <div class="mt-3 space-y-2">
                 <RenderSettingsFields
                   bind:value={renderSettings}
-                  disabled={!editable || posting || savingRenderSettings}
-                  onChange={saveRenderSettings}
+                  disabled={!editable || busy}
+                  layout="rows"
                 />
                 <p class="ui-hint">{upload.source === "project" ? "与此切片的导出设置同步。" : "投稿压制弹幕时使用这些设置。"}</p>
               </div>
-            </section>
+            </details>
           {/if}
-        </div>
+        </aside>
 
         <fieldset
-          class="min-w-0 space-y-3.5 disabled:opacity-70"
-          disabled={!editable || posting}
-          oninput={scheduleSave}
-          onchange={scheduleSave}
+          class="copy-column"
+          disabled={!editable || busy}
         >
-          <label class="block space-y-1.5">
-            <span class="ui-label">标题</span>
+          <label class="title-field">
+            <span class="field-label">视频标题 <span class="char-count" aria-hidden="true">{profile.title.length} / 80</span></span>
             <input
               type="text"
               bind:this={titleInput}
               bind:value={profile.title}
               placeholder="输入视频标题"
               maxlength="80"
-              class="ui-input w-full"
+              class="headline-input"
             />
           </label>
-          <div class="space-y-1.5">
-            <span class="ui-label">视频分区</span>
-            <TypeSelect bind:value={profile.tid} disabled={!editable} />
+          <div>
+            <span class="field-label">视频分区</span>
+            <TypeSelect bind:value={profile.tid} bind:fallback={fallbackTid} disabled={!editable || busy} />
           </div>
-          <label class="block space-y-1.5">
-            <span class="ui-label">投稿账号</span>
-            <select bind:value={uid} class="ui-input w-full">
-              <option value="">选择账号</option>
-              {#each accounts as account (account.uid)}
-                <option value={account.uid}>{account.name}</option>
-              {/each}
-            </select>
-            {#if accounts.length === 0}
-              <span class="ui-hint block">还没有 B 站账号，请先在「账号」页登录。</span>
-            {/if}
+          <label class="block">
+            <span class="field-label">视频简介</span>
+            <textarea bind:value={profile.desc} placeholder="介绍这段视频…" rows="3" class="ui-input w-full resize-y"></textarea>
           </label>
-          <label class="block space-y-1.5">
-            <span class="ui-label">描述</span>
-            <textarea bind:value={profile.desc} placeholder="输入视频描述" rows="3" class="ui-input w-full resize-none"></textarea>
-          </label>
-          <div class="space-y-1.5">
-            <span class="ui-label">标签</span>
+          <div>
+            <span class="field-label">标签</span>
             <TagInput
               value={[...new Set(profile.tag.split(",").map((tag) => tag.trim()).filter(Boolean))]}
               onChange={setTags}
-              disabled={!editable || posting}
+              hint=""
+              disabled={!editable || busy}
             />
           </div>
-          <label class="block space-y-1.5">
-            <span class="ui-label">动态</span>
-            <textarea bind:value={profile.dynamic} placeholder="输入动态内容" rows="2" class="ui-input w-full resize-none"></textarea>
-          </label>
+          <details class="dynamic-options" open={!!base.id && !!originalProfile.dynamic}>
+            <summary>投稿动态 <span class="text-xs font-normal text-fg-muted">选填</span><ChevronDown class="disclosure-arrow" size={14} /></summary>
+            <textarea aria-label="投稿动态" bind:value={profile.dynamic} placeholder="输入动态内容" rows="2" class="ui-input mt-2 w-full resize-y"></textarea>
+          </details>
         </fieldset>
       </div>
     </div>
 
-    <div class="ui-modal-footer justify-between">
-      <span class="min-w-0 truncate text-[11px] {saveError ? 'text-danger-fg' : 'text-fg-muted'}">
-        {#if saveError}
-          保存失败：{saveError}
-        {:else if editable}
-          修改会自动保存为草稿
-        {/if}
-      </span>
-      <div class="flex shrink-0 gap-2">
-        <button type="button" class="ui-btn" onclick={close}>关闭</button>
-        {#if editable}
+    {#if confirmClose}
+      <div class="decision-bar" role="alertdialog" aria-modal="true" aria-labelledby="draft-close-title" aria-describedby="draft-close-detail" use:trapFocus>
+        <div>
+          <h4 id="draft-close-title">保存为草稿再离开？</h4>
+          <p id="draft-close-detail">不保存，本次修改将丢失。</p>
+        </div>
+        <div class="decision-actions">
+          <button type="button" class="ui-btn ui-btn-ghost" onclick={continueEditing}>继续编辑</button>
+          <button type="button" class="ui-btn" onclick={onClose}>不保存</button>
+          <button type="button" class="ui-btn ui-btn-primary" disabled={!editable} onclick={saveDraft}>保存草稿</button>
+        </div>
+      </div>
+    {:else}
+      {#if saveError}<p role="alert" class="save-error"><AlertCircle size={15} />草稿未保存：{saveError}</p>{/if}
+      <div class="publish-bar">
+        <div class="account-block">
+          <label><span>投稿账号</span>
+            <select bind:value={uid} disabled={!editable || busy || accounts.length === 0} class="ui-input">
+              <option value="">{accounts.length ? "选择账号" : "未登录"}</option>
+              {#each accounts as account (account.uid)}
+                <option value={account.uid}>{account.name}</option>
+              {/each}
+              {#if uid && !accounts.some(account => account.uid === uid)}
+                <option value={uid}>{uid}</option>
+              {/if}
+            </select>
+          </label>
+          {#if editable && accounts.length === 0}<p>可先存草稿，投稿前请在「账号」页登录。</p>{/if}
+        </div>
+        {#if editable}<div class="publish-actions">
+          <button type="button" class="ui-btn" disabled={busy || generatingCover} onclick={saveDraft}>{saving ? "保存中…" : "保存草稿"}</button>
           <button
             type="button"
             class="ui-btn ui-btn-primary"
-            disabled={Boolean(blocker) || posting || savingDanmu || savingRenderSettings || generatingCover}
+            disabled={Boolean(blocker) || busy || generatingCover}
             title={blocker || undefined}
             onclick={post}
           >
@@ -561,9 +533,9 @@
             {/if}
             {upload.status === "failed" ? "重新投稿" : "投稿"}
           </button>
-        {/if}
+        </div>{/if}
       </div>
-    </div>
+    {/if}
   </div>
 </div>
 
@@ -576,3 +548,103 @@
     onSave={saveCover}
   />
 {/key}
+</div>
+
+<style>
+  .upload-sheet {
+    width: min(884px, 100%);
+    max-height: min(90dvh, 820px);
+  }
+  .sheet-head, .publish-bar, .decision-bar {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 24px;
+  }
+  .sheet-head { border-bottom: 1px solid rgb(var(--c-line)); }
+  .sheet-head h3, .field-label, summary, .account-block label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sheet-head h3 { font-size: 18px; font-weight: 650; }
+  .draft-marker, .char-count, .account-block p, .decision-bar p {
+    font-size: 12px;
+    color: rgb(var(--c-fg-muted));
+  }
+  .draft-marker { border-left: 1px solid rgb(var(--c-line-strong)); padding-left: 12px; }
+  .sheet-columns { display: grid; grid-template-columns: minmax(0, 36%) minmax(0, 1fr); }
+  .media-column, .copy-column { min-width: 0; padding: 24px; }
+  .media-column { background: rgb(var(--c-canvas)); border-right: 1px solid rgb(var(--c-line)); }
+  .copy-column { display: grid; align-content: start; gap: 16px; }
+  .copy-column :global(.ui-input), .account-block select { font-size: 13px; }
+  .field-label { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+  .cover-frame {
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-radius: 4px;
+    background: #273343;
+    color: #dce4ef;
+  }
+  .cover-frame img { width: 100%; height: 100%; object-fit: cover; }
+  .empty-frame {
+    display: grid;
+    align-content: center;
+    justify-items: center;
+    gap: 8px;
+    height: 100%;
+    font-size: 12px;
+    background-image: linear-gradient(to right, transparent calc(100% - 1px), #ffffff12 0),
+      linear-gradient(to bottom, transparent calc(100% - 1px), #ffffff12 0);
+    background-size: 33.333% 33.333%;
+  }
+  .cover-tools { display: flex; justify-content: space-between; gap: 4px; padding-top: 6px; }
+  .source-block, .media-options { border-top: 1px solid rgb(var(--c-line-strong)); padding-top: 16px; margin-top: 16px; }
+  .source-block > p + p, .source-block label { margin-top: 5px; }
+  summary { width: 100%; cursor: pointer; font-size: 13px; font-weight: 600; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary:focus-visible { outline: 2px solid rgb(var(--c-accent)); outline-offset: 3px; }
+  summary :global(.disclosure-arrow) { margin-left: auto; color: rgb(var(--c-fg-muted)); }
+  details[open] > summary :global(.disclosure-arrow) { transform: rotate(180deg); }
+  .char-count { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: normal; }
+  .headline-input {
+    width: 100%; min-width: 0; padding: 2px 0 10px;
+    border: 0; border-bottom: 1px solid rgb(var(--c-line-strong)); border-radius: 0;
+    background: transparent; color: rgb(var(--c-fg));
+    font: 600 24px/1.35 system-ui, sans-serif;
+  }
+  .headline-input:focus { border-color: rgb(var(--c-accent-fg)); box-shadow: 0 1px rgb(var(--c-accent-fg)); outline: none; }
+  .headline-input::placeholder { color: rgb(var(--c-fg-muted)); font-weight: 400; }
+  .dynamic-options { border-top: 1px solid rgb(var(--c-line)); padding-top: 12px; }
+  .publish-bar, .decision-bar { justify-content: space-between; border-top: 1px solid rgb(var(--c-line)); }
+  .account-block { min-width: 0; }
+  .account-block label { font-size: 12px; font-weight: 600; }
+  .account-block select { max-width: min(220px, 60%); }
+  .account-block p, .decision-bar p { margin-top: 3px; line-height: 1.5; }
+  .publish-actions, .decision-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .publish-actions .ui-btn, .decision-actions .ui-btn { min-height: 36px; padding-inline: 15px; }
+  .upload-sheet .ui-btn-primary { background-color: #0066d6; }
+  .upload-sheet .ui-btn-primary:hover:not(:disabled) { background-color: #0056b5; }
+  .decision-bar { background: rgb(var(--c-accent-soft)); }
+  .decision-bar h4 { font-size: 16px; font-weight: 600; }
+  .save-error { display: flex; align-items: baseline; gap: 7px; padding: 9px 24px; color: rgb(var(--c-danger-fg)); background: rgb(var(--c-danger-soft)); font-size: 13px; overflow-wrap: anywhere; }
+
+  @media (max-width: 680px) {
+    .upload-sheet { max-height: calc(100dvh - 16px); }
+    .sheet-columns { grid-template-columns: minmax(0,1fr); }
+    .sheet-head, .media-column, .copy-column, .publish-bar, .decision-bar { padding: 14px 16px; }
+    .media-column {
+      display: grid; grid-template-columns: minmax(0, 44%) minmax(0,1fr);
+      gap: 10px 16px; align-items: start;
+      border-right: 0; border-bottom: 1px solid rgb(var(--c-line));
+    }
+    .source-block { border: 0; padding: 0; margin: 0; }
+    .media-options { grid-column: 1 / -1; margin: 0; padding-top: 10px; }
+    .cover-tools { flex-wrap: wrap; justify-content: flex-start; gap: 0; }
+    .cover-tools .ui-btn { padding-inline: 3px; }
+    .publish-bar, .decision-bar { align-items: start; flex-wrap: wrap; }
+    .publish-actions, .decision-actions { margin-left: auto; }
+    .headline-input { font-size: 21px; }
+  }
+</style>

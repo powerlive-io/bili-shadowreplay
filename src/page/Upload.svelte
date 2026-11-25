@@ -65,10 +65,11 @@
   let search = $state("");
   let showSourceDialog = $state(false);
   let editingId: number | null = $state(null);
+  let preview: UploadItem | null = $state(null);
   const selectedUploads = new SvelteSet<number>();
   let uploadsToDelete: UploadRow[] | null = $state(null);
 
-  let editing = $derived(uploads.find((upload) => upload.id === editingId) ?? null);
+  let editing = $derived(preview ?? uploads.find((upload) => upload.id === editingId) ?? null);
   let accountNames = $derived(new Map(accounts.map((account) => [account.uid, account.name])));
   let counts = $derived(
     Object.fromEntries(filters.map((item) => [item.value, uploads.filter(item.match).length])),
@@ -173,9 +174,7 @@
   async function createDraft(pick: UploadPick) {
     try {
       const draft = await draftUpload(pick, uploads);
-      if (!uploads.some((upload) => upload.id === draft.id)) {
-        uploads = [await toRow(draft), ...uploads];
-      }
+      preview = draft.id === 0 ? draft : null;
       showSourceDialog = false;
       editingId = draft.id;
     } catch (error) {
@@ -447,7 +446,7 @@
       upload={editing}
       {accounts}
       onChanged={() => stateRefresh.run()}
-      onClose={() => (editingId = null)}
+      onClose={() => { preview = null; editingId = null; }}
     />
   {/key}
 {/if}

@@ -1354,6 +1354,8 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::upload::get_uploads,
         crate::handlers::upload::get_upload,
         crate::handlers::upload::create_upload,
+        crate::handlers::upload::draft::preview_upload,
+        crate::handlers::upload::draft::save_upload_draft,
         crate::handlers::upload::update_upload,
         crate::handlers::upload::update_upload_cover,
         crate::handlers::cover_ai::suggest_upload_cover,
