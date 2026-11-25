@@ -9,6 +9,7 @@
   import S3CredentialFields from "./S3CredentialFields.svelte";
   import { Check, FolderOpen, HardDrive, ListChecks, Plus, Trash2, X } from "lucide-svelte";
   import { trapFocus } from "../focus-trap";
+  import { mountToViewport } from "../actions/mountToViewport";
   import { pageVisibility } from "../page-visibility";
   import { openTaskCenter } from "../stores/tasks";
   import { createStateRefresh, watchStateChanges } from "../state-refresh";
@@ -58,12 +59,6 @@
     } catch {
       if (!disposed && request === catalogRequest) catalogStatuses = {};
     }
-  }
-
-  function mountToViewport(node: HTMLElement) {
-    // PageView's containment otherwise limits fixed dialogs to the page column.
-    document.body.appendChild(node);
-    return { destroy() { node.remove(); } };
   }
 
   function selectView(next: "locations" | "transfer") {

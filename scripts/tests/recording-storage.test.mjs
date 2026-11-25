@@ -88,12 +88,16 @@ test("storage settings open on demand in a focused modal instead of expanding th
 });
 
 test("viewport modal leaves page containment and removes its relocated node on destroy", async () => {
-  const { state } = await settingsFixture();
+  const module = new vm.SourceTextModule(transpile(await readFile(
+    new URL("../../src/lib/actions/mountToViewport.ts", import.meta.url), "utf8",
+  )));
+  await module.link(() => { throw new Error("Unexpected viewport action dependency"); });
+  await module.evaluate();
   let appended;
   let removed = false;
-  state.document = { body: { appendChild(node) { appended = node; } } };
-  const node = { remove() { removed = true; } };
-  const action = state.mountToViewport(node);
+  const ownerDocument = { body: { appendChild(node) { appended = node; } } };
+  const node = { ownerDocument, remove() { removed = true; } };
+  const action = module.namespace.mountToViewport(node);
   assert.equal(appended, node);
   action.destroy();
   assert.equal(removed, true);

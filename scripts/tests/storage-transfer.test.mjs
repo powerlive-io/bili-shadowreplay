@@ -433,6 +433,7 @@ test("parent locks CRUD during recovery/transfer but allows close after queue re
 test("both settings views stay mounted with hidden/inert so background recovery is never gated by navigation", async () => {
   const dependencies = {
     "@tauri-apps/plugin-dialog": { open() {} },
+    "../actions/mountToViewport": { mountToViewport() {} },
     "../invoker": { invoke() {}, TAURI_ENV: false },
     "../recording-storage": recordingStorage,
     "../focus-trap": { trapFocus() {} },
