@@ -147,6 +147,7 @@ pub(crate) async fn prepare_relocation(
             for (cover, name) in [
                 (&mut next.cover, "cover.jpg"),
                 (&mut next.cover43, "cover43.jpg"),
+                (&mut next.cover_project, "cover-project.json"),
             ] {
                 if cover.is_empty() {
                     continue;
@@ -271,6 +272,7 @@ mod tests {
             uid: String::new(),
             cover: String::new(),
             cover43: String::new(),
+            cover_project: String::new(),
             profile: "{}".into(),
             danmu: false,
             render_settings_json: "{}".into(),
@@ -290,8 +292,7 @@ mod tests {
     }
 
     #[cfg(feature = "headless")]
-    #[tokio::test]
-    async fn saved_web_upload_keeps_preview_cover_and_deletion_after_session_change() {
+    async fn test_app() -> (tempfile::TempDir, crate::state::State, sqlx::SqlitePool) {
         use crate::{
             config::Config,
             recorder_manager::RecorderManager,
@@ -323,7 +324,7 @@ mod tests {
             root.path().into(),
             webhook_poster.clone(),
         ));
-        let mut state = State {
+        let state = State {
             mcp_server: Arc::new(crate::mcp::McpServer::default()),
             temp_storage: TempStorage::new().unwrap(),
             db,
@@ -335,6 +336,15 @@ mod tests {
             resource_dir: root.path().into(),
             readonly: false,
         };
+        (root, state, pool)
+    }
+
+    #[cfg(feature = "headless")]
+    #[tokio::test]
+    async fn saved_web_upload_keeps_preview_cover_and_deletion_after_session_change() {
+        use crate::config::Config;
+        let (root, mut state, pool) = test_app().await;
+        let output = root.path().join("output");
         let input = uploaded(&state.temp_storage);
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -536,6 +546,99 @@ mod tests {
             .unwrap();
         assert!(!Path::new(&loaded.upload.file).exists());
         assert!(!cover.exists());
+    }
+
+    #[cfg(feature = "headless")]
+    #[tokio::test]
+    async fn headless_cover_design_round_trip() {
+        use super::super::{draft::save_upload_draft, ensure_cover_exports};
+        use crate::handlers::cover_ai::design_upload_cover;
+        use serde_json::{from_value, json, Value};
+
+        let (root, state, _) = test_app().await;
+        let output = root.path().join("output");
+        let video = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/ffmpeg_utils/src/video_frame/fixtures/seek.mp4");
+        let source = json!({"source":"file", "file":video});
+        let profile = json!({"title":"直播高光回顾：最后一刻的精彩瞬间"});
+        // Only the model is stubbed. Frame extraction, layout, save and re-render use production code.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        state.config.write().await.llm = crate::config::LlmConfig {
+            provider: "openai".into(),
+            endpoint: format!("http://{address}/v1"),
+            api_key: "fixture".into(),
+            model: "fixture".into(),
+        };
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(|axum::Json(request):axum::Json<Value>| async move {
+            assert!(request.to_string().contains("data:image/jpeg;base64,"));
+            axum::Json(json!({"id":"test","object":"chat.completion","created":1,"model":"fixture",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"{\"frame_index\":1,\"style\":\"tag-red\",\"position\":{\"x\":0.5,\"y\":0.8}}"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let design = design_upload_cover(
+            state.clone(),
+            0,
+            Some(from_value(source.clone()).unwrap()),
+            Some(profile.clone()),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(design.warning, None);
+        assert!(state.db.get_uploads().await.unwrap().is_empty());
+        // Exercise the wire encoding, rather than widening f32 to f64 via to_value.
+        let document: Value =
+            serde_json::from_slice(&serde_json::to_vec(&design.project).unwrap()).unwrap();
+        let mut edit =
+            json!({"id":0,"source":source,"profile":profile,"uid":"","coverProject":document});
+        let row = save_upload_draft(state.clone(), from_value(edit.clone()).unwrap())
+            .await
+            .unwrap()
+            .upload;
+        let read = |path: &str| std::fs::read(output.join(path)).unwrap();
+        let wide = read(&row.cover);
+        let home = read(&row.cover43);
+        let mut reopened: Value = serde_json::from_slice(&read(&row.cover_project)).unwrap();
+        assert_eq!(reopened, edit["coverProject"]);
+        assert_eq!(reopened["covers"]["home"][0]["background"], "#FF3B30");
+        assert_eq!(reopened["covers"]["wide"][0]["kind"], "text");
+        reopened["covers"]["home"][0]["content"] = "手动调整".into();
+        reopened["syncCovers"] = false.into();
+        edit["id"] = row.id.into();
+        edit["expectedAt"] = row.updated_at.into();
+        edit["coverProject"] = reopened.clone();
+        let saved = save_upload_draft(state.clone(), from_value(edit.clone()).unwrap())
+            .await
+            .unwrap()
+            .upload;
+        assert_eq!(read(&saved.cover), wide);
+        assert_ne!(read(&saved.cover43), home);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&read(&saved.cover_project)).unwrap(),
+            reopened
+        );
+        assert!(!output.join(row.cover_project).exists());
+        let home = read(&saved.cover43);
+        std::fs::remove_file(output.join(&saved.cover43)).unwrap();
+        ensure_cover_exports(&output, &saved).await.unwrap();
+        assert_eq!(read(&saved.cover43), home);
+        edit["expectedAt"] = saved.updated_at.into();
+        edit["coverProject"]["version"] = 99.into();
+        assert!(save_upload_draft(state.clone(), from_value(edit).unwrap())
+            .await
+            .is_err());
+        assert_eq!(
+            state.db.get_upload(saved.id).await.unwrap().cover_project,
+            saved.cover_project
+        );
+        let legacy = super::super::update_upload_cover(state, saved.id, design.cover, None)
+            .await
+            .unwrap()
+            .upload;
+        assert!(legacy.cover_project.is_empty());
+        assert!(!output.join(saved.cover_project).exists());
     }
 
     #[tokio::test]

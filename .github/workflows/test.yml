@@ -150,5 +150,6 @@ jobs:
         run: |
           cargo test --package bili-shadowreplay --no-default-features --features headless database::catalog --locked
           cargo test --package bili-shadowreplay --no-default-features --features headless storage_migration_tests --locked
+          cargo test --package bili-shadowreplay --no-default-features --features headless headless_cover_design_round_trip --locked
         env:
           RUST_BACKTRACE: 1

@@ -23,7 +23,6 @@ function editor() {
     upload: { source: "material" }, $state: { snapshot: structuredClone },
     onClose: () => calls.push("closed"), onChanged: async () => {}, saveRoomTemplate() {},
     adopt: row => { f.base = row; }, invoke: async (cmd, args) => { calls.push([cmd, args]); return { id: 42 }; },
-    renderAutoCover: async () => ({ cover: "wide", cover43: "home" }),
     generateEventId: () => "event", announceTask() {}, openTaskCenter() {}, settleTask() {},
   });
   vm.runInContext(code, f);
@@ -44,17 +43,23 @@ test("closing a clean preview does not create a row; dirty close only asks", () 
 
 test("manual and AI cover changes stay local until an explicit save", async () => {
   const f = editor();
+  const design = { cover: "wide preview", project: { version: 1 }, warning: null };
+  f.invoke = async (cmd, args) => {
+    f.calls.push([cmd, args]);
+    return cmd === "design_upload_cover" ? design : { id: 42 };
+  };
   f.setTags(["clip"]);
-  await f.saveCover({ cover: "manual", cover43: "manual43" });
+  await f.saveCover({ cover: "manual", project: { version: 1 } });
   assert.deepEqual(f.calls, []);
   await f.generateCover();
-  assert.deepEqual(f.calls.map(([cmd]) => cmd), ["suggest_upload_cover"]);
+  assert.deepEqual(f.calls.map(([cmd]) => cmd), ["design_upload_cover"]);
   assert.equal(f.calls[0][1].profile.tag, "clip");
   await f.saveDraft();
   const [cmd, { edit }] = f.calls[1];
   assert.equal(cmd, "save_upload_draft");
   assert.equal(edit.uid, "", "saving needs no posting account");
-  assert.equal(edit.covers.cover, "wide");
+  assert.equal(edit.coverProject, design.project);
+  assert.equal(edit.covers, null, "JPEG preview must never replace its editable source");
   assert.equal(edit.danmu.value, true);
   assert.equal(edit.renderSettings.value.bitrate_kbps, 12000);
   assert.equal(f.calls[2], "closed");

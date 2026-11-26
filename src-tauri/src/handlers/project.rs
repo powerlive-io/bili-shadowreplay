@@ -1752,6 +1752,7 @@ pub async fn create_legacy_projects(db: Arc<Database>, output: PathBuf) {
             uid: String::new(),
             cover: String::new(),
             cover43: String::new(),
+            cover_project: String::new(),
             profile: project.profile.clone(),
             danmu: false,
             render_settings_json: "{}".to_string(),

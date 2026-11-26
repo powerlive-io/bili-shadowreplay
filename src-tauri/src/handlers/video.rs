@@ -853,6 +853,7 @@ async fn upload_procedure_inner(
             uid,
             cover: String::new(),
             cover43: String::new(),
+            cover_project: String::new(),
             profile: serde_json::to_string(&posted.profile).unwrap_or_default(),
             danmu: false,
             render_settings_json: "{}".to_string(),

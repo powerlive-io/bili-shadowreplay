@@ -1,8 +1,5 @@
 //! The editor previews an unsaved source and publishes all its edits together.
-use super::{
-    ensure_editable, new_upload, output_dir, source, upload_dir, upload_view, write_cover,
-    UploadView,
-};
+use super::{ensure_editable, new_upload, output_dir, source, upload_dir, upload_view, UploadView};
 use crate::{
     events::DataChange,
     ffmpeg::runner::TempArtifact,
@@ -99,6 +96,7 @@ pub struct DraftEdit {
     uid: String,
     profile: Value,
     covers: Option<Covers>,
+    cover_project: Option<native_overlay::cover::Project>,
     danmu: Option<Change<bool>>,
     render_settings: Option<Change<RenderSettings>>,
 }
@@ -118,6 +116,29 @@ pub async fn save_upload_draft(
 }
 
 async fn save(state: &State, edit: DraftEdit) -> Result<UploadView, String> {
+    // Render before taking the storage gate or reserving a SQLite writer.
+    // The optimistic updated_at check below still rejects a stale result.
+    let assets = match (edit.cover_project, edit.covers) {
+        (Some(_), Some(_)) => return Err("不能同时设置封面图片和工程".into()),
+        (Some(project), None) => Some(
+            tokio::task::spawn_blocking(move || {
+                let pair = project.render()?;
+                let document = serde_json::to_vec(&project).map_err(|e| e.to_string())?;
+                Ok::<_, String>((pair.wide, Some(pair.home), Some(document)))
+            })
+            .await
+            .map_err(|e| e.to_string())??,
+        ),
+        (None, Some(covers)) => {
+            use crate::handlers::utils::decode_data_url;
+            Some((
+                decode_data_url(&covers.cover)?,
+                covers.cover43.as_deref().map(decode_data_url).transpose()?,
+                None,
+            ))
+        }
+        (None, None) => None,
+    };
     let _operation = source::source_operation().await;
     let output = output_dir(state).await;
     let mut row = if edit.id == 0 {
@@ -170,7 +191,11 @@ async fn save(state: &State, edit: DraftEdit) -> Result<UploadView, String> {
     } else {
         None
     };
-    let old = [row.cover.clone(), row.cover43.clone()];
+    let old = [
+        row.cover.clone(),
+        row.cover43.clone(),
+        row.cover_project.clone(),
+    ];
     let (mut tx, id) = state
         .db
         .begin_upload_edit(
@@ -181,26 +206,37 @@ async fn save(state: &State, edit: DraftEdit) -> Result<UploadView, String> {
         .await?;
     row.id = id;
     let mut artifacts = Vec::new();
-    if let Some(covers) = edit.covers {
+    if let Some((wide, home, document)) = assets {
         let name = uuid::Uuid::new_v4();
         row.cover = format!("{}/cover_{name}.jpg", upload_dir(id));
         row.cover43.clear();
-        if covers.cover43.is_some() {
+        row.cover_project.clear();
+        if home.is_some() {
             row.cover43 = format!("{}/cover43_{name}.jpg", upload_dir(id));
         }
+        if document.is_some() {
+            row.cover_project = format!("{}/cover_{name}.json", upload_dir(id));
+        }
+        tokio::fs::create_dir_all(output.join(upload_dir(id)))
+            .await
+            .map_err(|e| e.to_string())?;
         for (relative, data) in [
-            (&row.cover, Some(covers.cover)),
-            (&row.cover43, covers.cover43),
+            (&row.cover, Some(wide)),
+            (&row.cover43, home),
+            (&row.cover_project, document),
         ] {
             if let Some(data) = data {
                 let path = output.join(relative);
                 artifacts.push(TempArtifact::new(path.clone()));
-                write_cover(&path, &data).await?;
+                tokio::fs::write(&path, data)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         }
-        sqlx::query("UPDATE uploads SET cover=?, cover43=? WHERE id=?")
+        sqlx::query("UPDATE uploads SET cover=?, cover43=?, cover_project=? WHERE id=?")
             .bind(&row.cover)
             .bind(&row.cover43)
+            .bind(&row.cover_project)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -221,6 +257,7 @@ async fn save(state: &State, edit: DraftEdit) -> Result<UploadView, String> {
         if file.starts_with(&format!("{}/", upload_dir(id)))
             && file != row.cover
             && file != row.cover43
+            && file != row.cover_project
         {
             let _ = tokio::fs::remove_file(output.join(file)).await;
         }

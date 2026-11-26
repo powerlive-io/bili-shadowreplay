@@ -277,3 +277,53 @@ pub async fn suggest_upload_cover(
         warning,
     })
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct CoverDesign {
+    pub project: native_overlay::cover::Project,
+    /// Only a preview. save_upload_draft derives its own JPEGs from the project.
+    pub cover: String,
+    pub warning: Option<String>,
+}
+
+/// Return an unsaved design, usable by both a human editor and unattended clients.
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn design_upload_cover(
+    state: state_type!(),
+    id: i64,
+    source: Option<crate::handlers::upload::draft::DraftSource>,
+    profile: Option<serde_json::Value>,
+) -> Result<CoverDesign, String> {
+    let profile = match profile {
+        Some(profile) => profile,
+        None if id != 0 => serde_json::from_str(&state.db.get_upload(id).await?.profile)
+            .map_err(|e| e.to_string())?,
+        None => return Err("缺少封面标题".into()),
+    };
+    let title = profile["title"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if title.is_empty() {
+        return Err("缺少封面标题".into());
+    }
+    let s = suggest_upload_cover(state, id, source, Some(profile)).await?;
+    tokio::task::spawn_blocking(move || {
+        let project = native_overlay::cover::design(
+            format!("data:image/jpeg;base64,{}", s.frame_base64),
+            &title,
+            &s.style,
+            s.position.x as f32,
+            s.position.y as f32,
+        )?;
+        let cover = native_overlay::cover::jpeg_url(&project.render()?.wide);
+        Ok(CoverDesign {
+            project,
+            cover,
+            warning: s.warning,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

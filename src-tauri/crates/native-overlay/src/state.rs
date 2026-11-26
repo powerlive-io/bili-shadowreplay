@@ -105,11 +105,11 @@ mod tests {
     #[test]
     fn half_open_times_and_backwards_seeks() {
         let mut t = Timeline::new(vec![(0.0, 2.0), (1.0, 3.0), (3.0, 4.0)]);
-        assert_eq!(t.at(-1.0), &[]);
+        assert!(t.at(-1.0).is_empty());
         assert_eq!(t.at(1.0), &[0, 1]);
         assert_eq!(t.at(2.0), &[1]);
         assert_eq!(t.at(3.0), &[2]);
-        assert_eq!(t.at(9.0), &[]);
+        assert!(t.at(9.0).is_empty());
         assert_eq!(t.at(0.0), &[0]);
         assert_eq!(t.at(1.0), &[0, 1]);
     }

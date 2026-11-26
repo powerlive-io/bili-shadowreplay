@@ -1,21 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import vm from "node:vm";
-import ts from "typescript";
+import { coverModelModule } from "./cover-model-fixture.mjs";
 
-async function loadModule() {
-  const source = await readFile(new URL("../../src/lib/cover-elements.ts", import.meta.url), "utf8");
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
-  });
-  const module = new vm.SourceTextModule(outputText, { context: vm.createContext({}) });
-  await module.link(() => { throw new Error("Cover elements must have no runtime dependencies"); });
-  await module.evaluate();
-  return module.namespace;
-}
-
-const api = await loadModule();
+const api = (await coverModelModule()).namespace;
 const plain = (value) => JSON.parse(JSON.stringify(value));
 // Every character is half the font size wide.
 const measure = (text, font) => text.length * Number(/(\d+)px/.exec(font)[1]) * 0.5;

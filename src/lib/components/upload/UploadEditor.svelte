@@ -24,7 +24,6 @@
   import { get_static_url, invoke } from "../../invoker";
   import {
     generateEventId,
-    type CoverSuggestion,
     type OverlayImage,
     type ProjectItem,
     type UploadItem,
@@ -40,7 +39,7 @@
     sourceDescription,
     sourceLabels,
   } from "../../uploads";
-  import { renderAutoCover } from "../cover/auto-cover-render";
+  import type { CoverProject } from "../../cover-elements";
   import CoverEditor from "../cover/CoverEditor.svelte";
   import { stickerRefUrl } from "../cover/custom-stickers";
   import { renderOverlayImages, StickerLoadError } from "../project/overlay-render";
@@ -66,17 +65,15 @@
   let uid = $state(untrack(() => base.uid));
   let danmu = $state(untrack(() => base.danmu));
   let renderSettings = $state(untrack(() => ({ ...(base.render_settings ?? defaultRenderSettings()) })));
-  type Covers = { cover: string; cover43: string };
+  type Covers = { cover: string; project: CoverProject };
   let covers: Covers | null = $state.raw(null);
   let saving = $state(false);
   let confirmClose = $state(false);
   let saveError = $state("");
   let posting = $state(false);
   let generatingCover = $state(false);
-  // Bumped when the AI replaces the cover, rebuilding the manual editor so
-  // it re-initializes from the new picture (its own state is kept across
-  // plain open/close, which must not reset an edit in progress).
-  let coverEditorKey = $state(0);
+  let editorProject: CoverProject | null = $state.raw(null);
+  let openingCover = $state(false);
   let showCoverEditor = $state(false);
   let coverUrl = $state("");
   let coverFailed = $state(false);
@@ -85,7 +82,7 @@
   let closeButton: HTMLButtonElement | undefined = $state();
 
   let editable = $derived(isUploadEditable(upload));
-  let busy = $derived(saving || posting);
+  let busy = $derived(saving || posting || openingCover);
   let originalProfile = $derived(parseProfile(base.profile));
   let originalSettings = $derived(base.render_settings ?? defaultRenderSettings());
   let settingsChanged = $derived(JSON.stringify(renderSettings) !== JSON.stringify(originalSettings));
@@ -164,8 +161,9 @@
       uid, profile: snapshot,
       danmu: danmu !== base.danmu ? { base: base.danmu, value: danmu } : null,
       renderSettings: settingsChanged ? { base: originalSettings, value: $state.snapshot(renderSettings) } : null,
-      covers: covers ?? (!base.id && base.display_cover?.startsWith("data:image/jpeg;base64,")
-        ? { cover: base.display_cover } : null),
+      coverProject: covers?.project ?? null,
+      covers: !covers && !base.id && base.display_cover?.startsWith("data:image/jpeg;base64,")
+        ? { cover: base.display_cover } : null,
     } });
     adopt(stored);
     try {
@@ -200,22 +198,37 @@
     covers = images;
   }
 
+  async function openCover() {
+    if (busy || generatingCover) return;
+    openingCover = true;
+    try {
+      editorProject = covers?.project ?? null;
+      if (!editorProject && base.cover_project) {
+        const response = await fetch(await get_static_url("output", base.cover_project));
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        editorProject = await response.json();
+        if (editorProject?.version !== 1) throw new Error("不支持的封面工程版本");
+      }
+      showCoverEditor = true;
+    } catch (error) {
+      alert(`无法打开封面工程：${error}`);
+    } finally {
+      openingCover = false;
+    }
+  }
+
   /** AI 挑一帧画面并排上标题，生成即替换当前封面；不满意可再手动编辑。 */
   async function generateCover() {
     const title = profile.title.trim();
     if (!editable || busy || generatingCover || !title) return;
     generatingCover = true;
     try {
-      const suggestion = await invoke<CoverSuggestion>("suggest_upload_cover", {
+      const design = await invoke<Covers & { warning: string | null }>("design_upload_cover", {
         id: base.id, source: base.id ? null : draftSource(), profile: $state.snapshot(profile),
       });
-      covers = await renderAutoCover(suggestion, title);
-      // The AI cover replaced the file underneath the manual editor: bump
-      // the key so reopening rebuilds it from the new picture instead of
-      // keeping the pre-AI composition that would overwrite the result.
-      coverEditorKey++;
-      if (suggestion.warning) {
-        alert(`已用默认画面生成封面：${suggestion.warning}`);
+      covers = design;
+      if (design.warning) {
+        alert(`已用默认画面生成封面：${design.warning}`);
       }
     } catch (error) {
       alert("生成封面失败：" + (error instanceof Error ? error.message : error));
@@ -375,7 +388,7 @@
             {#if editable}
               <div class="cover-tools">
                 <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost"
-                  disabled={busy || generatingCover} onclick={() => (showCoverEditor = true)}>
+                  disabled={busy || generatingCover} onclick={openCover}>
                   <Pen size={13} /> 编辑封面
                 </button>
                 <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost"
@@ -539,15 +552,16 @@
   </div>
 </div>
 
-{#key coverEditorKey}
+{#if showCoverEditor}
   <CoverEditor
     bind:show={showCoverEditor}
+    project={editorProject}
     video={videoUrl ? { file: videoUrl } : null}
     image={coverUrl}
     title={profile.title}
     onSave={saveCover}
   />
-{/key}
+{/if}
 </div>
 
 <style>

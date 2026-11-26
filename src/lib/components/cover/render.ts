@@ -43,6 +43,11 @@ export function isCrossOrigin(src: string): boolean {
 const stickerRequests = new Map<string, Promise<HTMLImageElement>>();
 const stickerImages = new Map<string, HTMLImageElement>();
 
+export function forgetSticker(src: string) {
+  stickerRequests.delete(src);
+  stickerImages.delete(src);
+}
+
 /** The sticker image at `src`, loaded once. */
 export function loadSticker(src: string): Promise<HTMLImageElement> {
   let request = stickerRequests.get(src);
@@ -51,11 +56,11 @@ export function loadSticker(src: string): Promise<HTMLImageElement> {
       const image = new Image();
       if (isCrossOrigin(src)) image.crossOrigin = "anonymous";
       image.onload = () => {
-        stickerImages.set(src, image);
+        if (stickerRequests.get(src) === request) stickerImages.set(src, image);
         resolve(image);
       };
       image.onerror = () => {
-        stickerRequests.delete(src);
+        if (stickerRequests.get(src) === request) stickerRequests.delete(src);
         reject(new Error(`Failed to load sticker ${src}`));
       };
       image.src = src;

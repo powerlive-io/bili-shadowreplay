@@ -393,6 +393,7 @@ mod tests {
             uid: "1".into(),
             cover: String::new(),
             cover43: String::new(),
+            cover_project: String::new(),
             profile: "{}".into(),
             danmu: false,
             render_settings_json: "{}".to_string(),

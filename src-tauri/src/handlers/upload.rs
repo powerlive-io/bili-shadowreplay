@@ -336,6 +336,7 @@ async fn new_upload(
         uid: String::new(),
         cover: String::new(),
         cover43: String::new(),
+        cover_project: String::new(),
         profile: profile.to_string(),
         danmu: false,
         render_settings_json: "{}".to_string(),
@@ -476,7 +477,7 @@ pub async fn update_upload_cover(
     }
     // Only covers of its own, never a source's thumbnail.
     let own = format!("{}/", upload_dir(id));
-    for old in [&previous.cover, &previous.cover43] {
+    for old in [&previous.cover, &previous.cover43, &previous.cover_project] {
         if old.starts_with(&own) && *old != relative && *old != relative43 {
             let _ = tokio::fs::remove_file(output.join(old)).await;
         }
@@ -740,6 +741,7 @@ async fn post_upload_inner(
     if !file.is_file() {
         return Err(format!("视频文件不存在: {}", file.display()));
     }
+    ensure_cover_exports(&output, upload).await?;
     let cover = if upload.cover.is_empty() {
         source_cover.unwrap_or_default()
     } else {
@@ -761,6 +763,36 @@ async fn post_upload_inner(
         profile,
     )
     .await
+}
+
+/// A claimed upload pins all three paths. Never silently use a cropped or
+/// unrelated thumbnail when either derivative of its project is missing.
+async fn ensure_cover_exports(output: &Path, upload: &UploadRow) -> Result<(), String> {
+    if upload.cover_project.is_empty() {
+        return Ok(());
+    }
+    let document = output.join(&upload.cover_project);
+    let wide = output.join(&upload.cover);
+    let home = output.join(&upload.cover43);
+    if wide.is_file() && home.is_file() {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let data = std::fs::read(document).map_err(|e| format!("无法读取封面工程：{e}"))?;
+        let project: native_overlay::cover::Project =
+            serde_json::from_slice(&data).map_err(|e| format!("封面工程损坏：{e}"))?;
+        let pair = project.render()?;
+        for (path, bytes) in [(wide, pair.wide), (home, pair.home)] {
+            let mut file = tempfile::NamedTempFile::new_in(path.parent().ok_or("封面路径无效")?)
+                .map_err(|e| e.to_string())?;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            file.persist(path).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 async fn finish_upload(

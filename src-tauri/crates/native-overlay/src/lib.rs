@@ -1,4 +1,5 @@
 mod ass;
+pub mod cover;
 mod renderer;
 mod state;
 #[cfg(feature = "vulkan")]
