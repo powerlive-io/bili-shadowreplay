@@ -68,6 +68,7 @@ async fn parallel_video_decode_preserves_b_frames_trims_audio_and_eof_without_cl
                         options: [
                             ("preset".into(), "medium".into()),
                             ("crf".into(), "20".into()),
+                            ("x264-params".into(), ORACLE_X264_PARAMS.into()),
                         ]
                         .into(),
                         ..Default::default()
