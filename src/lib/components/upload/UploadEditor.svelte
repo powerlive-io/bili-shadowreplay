@@ -299,7 +299,7 @@
 
 <!-- Above full-window editors such as the clip editor (z-1000). -->
 <div use:mountToViewport hidden={!pageVisible()} inert={!pageVisible()}>
-<div class="ui-modal-backdrop z-[1100] p-2 sm:p-5">
+<div class="ui-modal-backdrop z-[1100] p-2 sm:px-5 sm:py-3">
   <div
     use:trapFocus={{ active: pageVisible(), initial: () => (editable ? titleInput : closeButton) }}
     class="ui-modal upload-sheet"
@@ -463,22 +463,26 @@
               class="headline-input"
             />
           </label>
-          <div>
+          <div class="form-row">
             <span class="field-label">视频分区</span>
-            <TypeSelect bind:value={profile.tid} bind:fallback={fallbackTid} disabled={!editable || busy} />
+            <div class="min-w-0">
+              <TypeSelect bind:value={profile.tid} bind:fallback={fallbackTid} disabled={!editable || busy} />
+            </div>
           </div>
-          <label class="block">
+          <label class="form-row">
             <span class="field-label">视频简介</span>
-            <textarea bind:value={profile.desc} placeholder="介绍这段视频…" rows="3" class="ui-input w-full resize-y"></textarea>
+            <textarea bind:value={profile.desc} placeholder="介绍这段视频…" rows="3" class="ui-input block w-full resize-y"></textarea>
           </label>
-          <div>
+          <div class="form-row">
             <span class="field-label">标签</span>
-            <TagInput
-              value={[...new Set(profile.tag.split(",").map((tag) => tag.trim()).filter(Boolean))]}
-              onChange={setTags}
-              hint=""
-              disabled={!editable || busy}
-            />
+            <div class="min-w-0">
+              <TagInput
+                value={[...new Set(profile.tag.split(",").map((tag) => tag.trim()).filter(Boolean))]}
+                onChange={setTags}
+                hint=""
+                disabled={!editable || busy}
+              />
+            </div>
           </div>
           <details class="dynamic-options" open={!!base.id && !!originalProfile.dynamic}>
             <summary>投稿动态 <span class="text-xs font-normal text-fg-muted">选填</span><ChevronDown class="disclosure-arrow" size={14} /></summary>
@@ -553,14 +557,14 @@
 <style>
   .upload-sheet {
     width: min(884px, 100%);
-    max-height: min(90dvh, 820px);
+    max-height: min(100%, 820px);
   }
   .sheet-head, .publish-bar, .decision-bar {
     display: flex;
     flex: none;
     align-items: center;
     gap: 12px;
-    padding: 16px 24px;
+    padding: 7px 20px;
   }
   .sheet-head { border-bottom: 1px solid rgb(var(--c-line)); }
   .sheet-head h3, .field-label, summary, .account-block label {
@@ -575,9 +579,11 @@
   }
   .draft-marker { border-left: 1px solid rgb(var(--c-line-strong)); padding-left: 12px; }
   .sheet-columns { display: grid; grid-template-columns: minmax(0, 36%) minmax(0, 1fr); }
-  .media-column, .copy-column { min-width: 0; padding: 24px; }
+  .media-column, .copy-column { min-width: 0; padding: 16px 20px; }
   .media-column { background: rgb(var(--c-canvas)); border-right: 1px solid rgb(var(--c-line)); }
-  .copy-column { display: grid; align-content: start; gap: 16px; }
+  .copy-column { display: grid; align-content: start; gap: 12px; }
+  .form-row { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 10px; align-items: start; }
+  .form-row .field-label { margin: 0; min-height: 30px; }
   .copy-column :global(.ui-input), .account-block select { font-size: 13px; }
   .field-label { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
   .cover-frame {
@@ -631,9 +637,11 @@
   .save-error { display: flex; align-items: baseline; gap: 7px; padding: 9px 24px; color: rgb(var(--c-danger-fg)); background: rgb(var(--c-danger-soft)); font-size: 13px; overflow-wrap: anywhere; }
 
   @media (max-width: 680px) {
-    .upload-sheet { max-height: calc(100dvh - 16px); }
     .sheet-columns { grid-template-columns: minmax(0,1fr); }
-    .sheet-head, .media-column, .copy-column, .publish-bar, .decision-bar { padding: 14px 16px; }
+    .sheet-head, .publish-bar, .decision-bar { padding-inline: 16px; }
+    .media-column, .copy-column { padding: 14px 16px; }
+    .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .form-row .field-label { min-height: 0; }
     .media-column {
       display: grid; grid-template-columns: minmax(0, 44%) minmax(0,1fr);
       gap: 10px 16px; align-items: start;
