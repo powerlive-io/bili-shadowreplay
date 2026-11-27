@@ -1217,6 +1217,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_configuration_save_waits_for_another_sqlite_writer() {
+        let (dir, storage) = fixture().await;
+        let mut next = storage.configuration().await.unwrap();
+        next.default_backend = "two".into();
+
+        let (_, pool) = database(&dir.path().join("test.db")).await;
+        let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let save = storage.replace_configuration(next.clone());
+        tokio::pin!(save);
+        if let Ok(result) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut save).await
+        {
+            panic!("save finished while another connection held the write lock: {result:?}");
+        }
+        writer.rollback().await.unwrap();
+        assert_eq!(save.await.unwrap(), next);
+    }
+
+    #[tokio::test]
     async fn archive_mutations_are_isolated_and_conflicts_are_retryable() {
         let (_directory, registry) = fixture().await;
         let guard = registry
