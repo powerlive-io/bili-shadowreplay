@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke, TAURI_ENV, normalizeEndpoint } from "../lib/invoker";
+  import { invoke, TAURI_ENV } from "../lib/invoker";
   import { open } from "@tauri-apps/plugin-dialog";
   import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
   import { clickOutside } from "../lib/actions/clickOutside";
@@ -23,13 +23,14 @@
     Monitor,
   } from "lucide-svelte";
   import { onMount } from "svelte";
+  import ApiEndpointForm from "../lib/components/ApiEndpointForm.svelte";
   import PowerLiveAccount from "../lib/components/PowerLiveAccount.svelte";
   import PowerLiveHotwords from "../lib/components/PowerLiveHotwords.svelte";
   import PowerLiveSentenceLength from "../lib/components/PowerLiveSentenceLength.svelte";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
   import RenderSettingsFields from "../lib/components/RenderSettingsFields.svelte";
   import RecordingStorageSettings from "../lib/components/RecordingStorageSettings.svelte";
-  import { defaultRenderSettings, normalizeRenderSettings } from "../lib/project-timeline";
+  import { normalizeRenderSettings } from "../lib/project-timeline";
   import { registerCommands } from "../lib/stores/commands";
   import {
     themePreference,
@@ -210,51 +211,12 @@
     ]),
   );
 
-  let setting_model: Config = $state({
-    storage: { default_backend: "", backends: {} },
-    output: "",
-    primary_uid: 0,
-    live_start_notify: true,
-    live_end_notify: true,
-    clip_notify: true,
-    post_notify: true,
-    auto_cleanup: true,
-    auto_subtitle: false,
-    mcp_enabled: false,
-    mcp_port: 18763,
-    subtitle_generator_type: "whisper",
-    openai_api_endpoint: "",
-    openai_api_key: "",
-    llm: {
-      provider: "openai",
-      endpoint: "https://api.openai.com/v1",
-      api_key: "",
-      model: "",
-    },
-    whisper_model: "",
-    whisper_prompt: "",
-    powerlive_hotwords: [],
-    powerlive_room_hotwords: {},
-    powerlive_sentence_max_length: 10,
-    clip_name_format: "",
-    auto_generate: {
-      enabled: false,
-      encode_danmu: false,
-      render_settings: defaultRenderSettings(),
-    },
-    status_check_interval: 30, // 默认30秒
-    whisper_language: "",
-
-    webhook_url: "",
-    danmu_ass_options: {
-      font_size: 36,
-      opacity: 0.8,
-    },
-  });
-
+  let setting_model = $state<Config | null>(null);
+  let configError = $state("");
   let show_clip_name_help = $state(false);
-  let endpoint = localStorage.getItem("endpoint") || "";
-  let endpointValue = $state(endpoint);
+  let whisperModelDraft = $derived(setting_model?.whisper_model ?? "");
+  let whisperModelSaving = $state(false);
+  let whisperModelError = $state("");
   let llmModels: string[] = $state([]);
   let llmModelsLoading = $state(false);
   let llmSaving = $state(false);
@@ -262,7 +224,6 @@
   let llmError = $state("");
   let showModelList = $state(false);
   let llmSaveChain: Promise<void> = Promise.resolve();
-  let autoGenerateLoading = $state(true);
   let autoGenerateSaving = $state(false);
   let autoGenerateError = $state("");
   let launchAtLogin = $state(false);
@@ -276,9 +237,7 @@
   let mcpPortChanged = $derived(
     mcpStatus !== null && mcpPortDraft !== mcpStatus.port,
   );
-  let mcpUrl = $derived(
-    mcpStatus?.url || `http://127.0.0.1:${setting_model.mcp_port}/mcp`,
-  );
+  let mcpUrl = $derived(mcpStatus?.url || `http://127.0.0.1:${setting_model?.mcp_port}/mcp`);
   let mcpClientConfig = $derived(
     JSON.stringify(
       { mcpServers: { bsr: { type: "http", url: mcpUrl } } },
@@ -382,23 +341,21 @@
     }
   }
 
-  function handleEndpointChange() {
-    endpointValue = normalizeEndpoint(endpointValue);
-    localStorage.setItem("endpoint", endpointValue);
-    // reload page
-    location.reload();
-  }
-
-  async function get_config() {
-    let config: Config = await invoke("get_config");
-    config.auto_generate.render_settings = normalizeRenderSettings(config.auto_generate.render_settings);
-    setting_model = config;
-    autoGenerateLoading = false;
-    console.log(config);
+  async function loadSettings() {
+    configError = "";
+    try {
+      const config = await invoke<Config>("get_config");
+      config.auto_generate.render_settings = normalizeRenderSettings(config.auto_generate.render_settings);
+      setting_model = config;
+    } catch (error) {
+      configError = `读取设置失败：${error}`;
+      return;
+    }
+    await loadMcpServerStatus();
   }
 
   async function updateAutoGenerate() {
-    if (autoGenerateLoading || autoGenerateSaving) return;
+    if (!setting_model || autoGenerateSaving) return;
     autoGenerateSaving = true;
     autoGenerateError = "";
     const settings = setting_model.auto_generate;
@@ -468,18 +425,25 @@
     });
   }
 
-  async function handleWhisperModelPathChange() {
+  async function browseWhisperModel() {
     const selected = await open({
       multiple: false,
       filters: [{ name: "Whisper Model", extensions: ["bin"] }],
     });
-    if (selected) {
-      setting_model.whisper_model = Array.isArray(selected)
-        ? selected[0]
-        : selected;
-      await invoke("update_whisper_model", {
-        whisperModel: setting_model.whisper_model,
-      });
+    if (selected) await saveWhisperModel(selected);
+  }
+
+  async function saveWhisperModel(path: string) {
+    if (!path || whisperModelSaving || path === setting_model.whisper_model) return;
+    whisperModelSaving = true;
+    whisperModelError = "";
+    try {
+      await invoke("update_whisper_model", { whisperModel: path });
+      setting_model.whisper_model = path;
+    } catch (error) {
+      whisperModelError = `模型路径未保存：${error}`;
+    } finally {
+      whisperModelSaving = false;
     }
   }
 
@@ -602,12 +566,9 @@
     }
   }
 
-  onMount(async () => {
-    await get_config();
-    await Promise.all([
-      loadLaunchAtLogin(),
-      ...(TAURI_ENV || endpoint !== "" ? [loadMcpServerStatus()] : []),
-    ]);
+  onMount(() => {
+    void loadSettings();
+    void loadLaunchAtLogin();
   });
 </script>
 
@@ -673,51 +634,53 @@
                 </div>
               </div>
             {/if}
-            <div class="px-4 py-3" data-setting="status-check-interval">
-              <div class="flex items-center justify-between gap-6">
-                <div>
-                  <h3 class="ui-label">
-                    直播间状态检查间隔
-                  </h3>
-                  <p class="ui-hint mt-0.5">
-                    设置直播间状态检查的时间间隔，单位为秒，过于频繁可能会触发风控
-                  </p>
-                </div>
-                <div class="flex items-center space-x-2">
-                  <input
-                    type="number"
-                    class="ui-input w-24"
-                    bind:value={setting_model.status_check_interval}
-                    onblur={update_status_check_interval}
-                  />
-                </div>
-              </div>
-            </div>
-            <div class="px-4 py-3" data-setting="webhook">
-              <div class="flex items-center justify-between gap-6">
-                <div>
-                  <h3 class="ui-label">
-                    Webhook URL
-                  </h3>
-                  <p class="ui-hint mt-0.5">
-                    设置 Webhook URL，用于接收事件通知，见<a
-                      href="https://bsr.powerlive.io/usage/features/webhook.html"
-                      class="text-accent-fg hover:underline"
-                      target="_blank">Webhook 文档</a
-                    >
-                  </p>
-                </div>
-                <div class="flex items-center space-x-2">
-                  <input
-                    type="text"
-                    class="ui-input w-96"
-                    bind:value={setting_model.webhook_url}
-                    onchange={update_webhook_url}
-                    placeholder="https://example.com/webhook"
-                  />
+            {#if setting_model}
+              <div class="px-4 py-3" data-setting="status-check-interval">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <h3 class="ui-label">
+                      直播间状态检查间隔
+                    </h3>
+                    <p class="ui-hint mt-0.5">
+                      设置直播间状态检查的时间间隔，单位为秒，过于频繁可能会触发风控
+                    </p>
+                  </div>
+                  <div class="flex items-center space-x-2">
+                    <input
+                      type="number"
+                      class="ui-input w-24"
+                      bind:value={setting_model.status_check_interval}
+                      onblur={update_status_check_interval}
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
+              <div class="px-4 py-3" data-setting="webhook">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <h3 class="ui-label">
+                      Webhook URL
+                    </h3>
+                    <p class="ui-hint mt-0.5">
+                      设置 Webhook URL，用于接收事件通知，见<a
+                        href="https://bsr.powerlive.io/usage/features/webhook.html"
+                        class="text-accent-fg hover:underline"
+                        target="_blank">Webhook 文档</a
+                      >
+                    </p>
+                  </div>
+                  <div class="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      class="ui-input w-96"
+                      bind:value={setting_model.webhook_url}
+                      onchange={update_webhook_url}
+                      placeholder="https://example.com/webhook"
+                    />
+                  </div>
+                </div>
+              </div>
+            {/if}
           </div>
         </div>
         <!-- API Server Settings -->
@@ -727,33 +690,20 @@
               <FileText class="h-4 w-4 text-fg-muted" />
               <span>API 服务器配置</span>
             </h2>
-            <div class="ui-card divide-y divide-line">
-              <div class="px-4 py-3" data-setting="api-endpoint">
-                <div class="flex items-center justify-between gap-6">
-                  <div>
-                    <h3 class="ui-label">
-                      API 服务器地址
-                    </h3>
-                    <p class="ui-hint mt-0.5">
-                      设置 API 服务器的地址
-                    </p>
-                  </div>
-                  <div class="flex items-center space-x-2">
-                    <input
-                      type="text"
-                      class="ui-input w-96"
-                      bind:value={endpointValue}
-                      onblur={handleEndpointChange}
-                      placeholder="http://localhost:3000"
-                    />
-                  </div>
-                </div>
-              </div>
+            <div class="ui-card px-4 py-3" data-setting="api-endpoint">
+              <ApiEndpointForm />
             </div>
           </div>
         {/if}
 
-        {#if TAURI_ENV || endpoint != ""}
+        {#if configError}
+          <div class="ui-card flex flex-wrap items-center gap-3 px-4 py-3">
+            <p class="text-[12px] text-danger-fg" role="alert">{configError}</p>
+            <button class="ui-btn ui-btn-sm" onclick={loadSettings}>重新读取设置</button>
+          </div>
+        {:else if !setting_model}
+          <p class="ui-hint" role="status">正在读取设置…</p>
+        {:else}
           <!-- MCP Server Settings -->
           <div class="space-y-3">
             <h2 class="flex items-center gap-2 text-[14px] font-semibold text-fg">
@@ -888,7 +838,7 @@
                   class="block select-text break-all rounded-[8px] border border-line bg-sunken px-3 py-2 text-[12px] text-fg"
                 >{mcpUrl}</code>
                 <p class="ui-hint">
-                  服务仅监听 BSR 所在机器的 127.0.0.1。外部客户端负责操作确认；BSR 只读模式下仅提供查询工具。见<a
+                  服务仅监听 BSR 所在机器的 127.0.0.1；使用 Docker 时，这是容器内的地址。外部客户端负责操作确认；BSR 只读模式下仅提供查询工具。见<a
                     href="https://bsr.powerlive.io/usage/features/mcp.html"
                     class="text-accent-fg hover:underline"
                     target="_blank"
@@ -927,58 +877,58 @@
             </div>
           </div>
           <!-- Storage Settings -->
-            <div class="space-y-3">
-              <h2 class="flex items-center gap-2 text-[14px] font-semibold text-fg">
-                <HardDrive class="h-4 w-4 text-fg-muted" />
-                <span>存储设置</span>
-              </h2>
-              <div class="ui-card divide-y divide-line">
-                <div class="px-4 py-3" data-setting="recording-storage">
-                  <div class="flex items-center justify-between gap-6">
-                    <div>
-                      <h3 class="ui-label">录制存储</h3>
-                      <p class="ui-hint mt-0.5">管理存储位置和新录播的默认存储</p>
-                    </div>
-                    <button class="ui-btn shrink-0" onclick={() => showStorageSettings = true}>管理</button>
+          <div class="space-y-3">
+            <h2 class="flex items-center gap-2 text-[14px] font-semibold text-fg">
+              <HardDrive class="h-4 w-4 text-fg-muted" />
+              <span>存储设置</span>
+            </h2>
+            <div class="ui-card divide-y divide-line">
+              <div class="px-4 py-3" data-setting="recording-storage">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <h3 class="ui-label">录制存储</h3>
+                    <p class="ui-hint mt-0.5">管理存储位置和新录播的默认存储</p>
                   </div>
+                  <button class="ui-btn shrink-0" onclick={() => showStorageSettings = true}>管理</button>
                 </div>
-                {#if TAURI_ENV}
-                <div class="px-4 py-3" data-setting="output-path">
-                  <div class="flex items-center justify-between gap-6">
-                    <div>
-                      <h3 class="ui-label">
-                        素材保存路径
-                      </h3>
-                      <p class="ui-hint mt-0.5">
-                        生成的素材和切片工程文件存放在这里
-                      </p>
-                      <p class="ui-hint mt-0.5 break-all">
-                        {setting_model.output}
-                      </p>
-                    </div>
+              </div>
+              <div class="px-4 py-3" data-setting="output-path">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <h3 class="ui-label">素材保存路径</h3>
+                    <p class="ui-hint mt-0.5">
+                      生成的素材和切片工程文件存放在这里。{#if !TAURI_ENV}使用 Docker 时，可通过卷挂载更换宿主机上的保存位置。{/if}
+                    </p>
+                    <p class="ui-hint mt-0.5 break-all">{setting_model.output}</p>
+                  </div>
+                  {#if TAURI_ENV}
                     <button class="ui-btn" onclick={handleOutputChange}>
                       变更
                     </button>
-                  </div>
+                  {/if}
                 </div>
-                <div class="px-4 py-3" data-setting="log-folder">
-                  <div class="flex items-center justify-between gap-6">
-                    <div>
-                      <h3 class="ui-label">
-                        日志文件夹
-                      </h3>
-                      <p class="ui-hint mt-0.5">
+              </div>
+              <div class="px-4 py-3" data-setting="log-folder">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <h3 class="ui-label">日志文件夹</h3>
+                    <p class="ui-hint mt-0.5">
+                      {#if TAURI_ENV}
                         查看应用程序日志文件
-                      </p>
-                    </div>
+                      {:else}
+                        日志保存在服务端。使用 Docker 时，可运行 <code>docker logs 容器名</code> 查看。
+                      {/if}
+                    </p>
+                  </div>
+                  {#if TAURI_ENV}
                     <button class="ui-btn" onclick={handleLogFolder}>
                       打开
                     </button>
-                  </div>
+                  {/if}
                 </div>
-                {/if}
               </div>
             </div>
+          </div>
 
           <!-- Notification Settings -->
           <div class="space-y-3">
@@ -986,6 +936,12 @@
               <Bell class="h-4 w-4 text-fg-muted" />
               <span>通知设置</span>
             </h2>
+            {#if !TAURI_ENV}
+              <p class="ui-card ui-hint px-4 py-3">
+                系统通知仅在桌面版发送。要接收服务端事件，请在基础设置中配置
+                <button class="text-accent-fg hover:underline" onclick={() => reveal("webhook")}>Webhook URL</button>。
+              </p>
+            {:else}
             <div class="ui-card divide-y divide-line">
               <!-- Stream Start -->
               <div class="px-4 py-3" data-setting="notify-live-start">
@@ -1069,6 +1025,7 @@
                 </div>
               </div>
             </div>
+            {/if}
           </div>
 
           <!-- Shared LLM Settings -->
@@ -1337,15 +1294,17 @@
               {/if}
               <!-- Whisper Model Path -->
               {#if setting_model.subtitle_generator_type !== "powerlive"}
-                {#if TAURI_ENV && setting_model.subtitle_generator_type === "whisper"}
+                {#if setting_model.subtitle_generator_type === "whisper"}
                   <div class="px-4 py-3" data-setting="whisper-model">
-                    <div class="flex items-center justify-between gap-6">
+                    <div class="flex flex-wrap items-center justify-between gap-4">
                       <div>
-                        <h3 class="ui-label">
-                          Whisper 模型路径
-                        </h3>
+                        <h3 class="ui-label">Whisper 模型路径</h3>
                         <p class="ui-hint mt-0.5 break-all">
-                          {setting_model.whisper_model || "未设置"}
+                          {#if TAURI_ENV}
+                            {setting_model.whisper_model || "未设置"}
+                          {:else}
+                            填写服务端可读取的模型文件路径。使用 Docker 时，请填写容器内的路径。
+                          {/if}
                           <span class="block mt-1"
                             >可前往 <a
                               href="https://huggingface.co/ggerganov/whisper.cpp/tree/main"
@@ -1356,11 +1315,28 @@
                           >
                         </p>
                       </div>
-                      <button
-                        class="ui-btn"
-                        onclick={handleWhisperModelPathChange}>变更</button
-                      >
+                      {#if TAURI_ENV}
+                        <button class="ui-btn" disabled={whisperModelSaving} onclick={browseWhisperModel}>变更</button>
+                      {:else}
+                        <form class="flex max-w-full items-center gap-2" onsubmit={(event) => {
+                          event.preventDefault();
+                          void saveWhisperModel(whisperModelDraft.trim());
+                        }}>
+                          <input
+                            class="ui-input min-w-0 flex-1"
+                            aria-label="Whisper 模型路径"
+                            placeholder="/app/whisper_model.bin"
+                            bind:value={whisperModelDraft}
+                            oninput={() => whisperModelError = ""}
+                            disabled={whisperModelSaving}
+                          />
+                          <button type="submit" class="ui-btn" disabled={whisperModelSaving || !whisperModelDraft.trim() || whisperModelDraft.trim() === setting_model.whisper_model}>
+                            保存
+                          </button>
+                        </form>
+                      {/if}
                     </div>
+                    {#if whisperModelError}<p class="ui-hint mt-1 text-danger-fg" role="alert">{whisperModelError}</p>{/if}
                   </div>
                 {/if}
                 <!-- OpenAI API Settings -->
@@ -1614,7 +1590,7 @@
               <SquareBottomDashedScissors class="h-4 w-4 text-fg-muted" />
               <span>自动素材生成</span>
             </h2>
-            <fieldset class="ui-card min-w-0 overflow-hidden" disabled={autoGenerateLoading || autoGenerateSaving}>
+            <fieldset class="ui-card min-w-0 overflow-hidden" disabled={autoGenerateSaving}>
               <!-- Auto Clip Generation -->
               <div class="px-4 py-3" data-setting="auto-generate">
                 <div class="flex items-center justify-between gap-6">
@@ -1670,7 +1646,7 @@
                       layout="rows"
                       showHint={false}
                       bind:value={setting_model.auto_generate.render_settings}
-                      disabled={autoGenerateLoading || autoGenerateSaving}
+                      disabled={autoGenerateSaving}
                       onChange={updateAutoGenerate}
                     />
                   </div>

@@ -68,7 +68,11 @@ export function createEventClient({ tauri, endpoint }: { tauri: boolean; endpoin
     for (const callback of [...(listeners.get(event) || [])]) callback(payload);
   }
 
-  const socket = tauri ? null : io(`${endpoint}/ws`, {
+  // A reverse proxy prefix belongs to the transport path, not to the
+  // Socket.IO namespace (the server always registers "/ws").
+  const server = tauri ? null : new URL(endpoint);
+  const socket = server && io(`${server.origin}/ws`, {
+    path: `${server.pathname.replace(/\/$/, "")}/socket.io`,
     transports: ["websocket", "polling"],
     autoConnect: true,
     reconnection: true,

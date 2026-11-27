@@ -7,7 +7,7 @@ import ts from "typescript";
 const source = await readFile(new URL("../../src/page/Setting.svelte", import.meta.url), "utf8");
 const script = source.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1];
 const parsed = ts.createSourceFile("Setting.ts", script, ts.ScriptTarget.Latest, true);
-const names = ["get_config", "updateAutoGenerate"];
+const names = ["loadSettings", "updateAutoGenerate"];
 const handlers = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text));
 assert.equal(handlers.length, names.length);
 const code = ts.transpileModule(handlers.map((node) => node.getText(parsed)).join("\n"), {
@@ -26,8 +26,9 @@ function fixture(autoGenerate = { enabled: false, encode_danmu: false }) {
   const saved = { auto_generate: plain(autoGenerate) };
   const requests = [];
   const state = {
-    setting_model: { auto_generate: { enabled: false, encode_danmu: false, render_settings: defaults() } },
-    autoGenerateLoading: true,
+    setting_model: null,
+    configError: "",
+    loadMcpServerStatus: async () => {},
     autoGenerateSaving: false,
     autoGenerateError: "",
     normalizeRenderSettings: timeline.namespace.normalizeRenderSettings,
@@ -55,8 +56,7 @@ function fixture(autoGenerate = { enabled: false, encode_danmu: false }) {
 
 test("old auto-generation config gains HEVC/speed/10 Mbps without enabling automation", async () => {
   const f = fixture();
-  await f.state.get_config();
-  assert.equal(f.state.autoGenerateLoading, false);
+  await f.state.loadSettings();
   assert.deepEqual(plain(f.state.setting_model.auto_generate), {
     enabled: false, encode_danmu: false, render_settings: defaults(),
   });
@@ -66,7 +66,7 @@ test("old auto-generation config gains HEVC/speed/10 Mbps without enabling autom
 for (const [field, value] of [["codec", "h264"], ["priority", "quality"], ["bitrate_kbps", 16000], ["resolution", "1080p"], ["resolution", "4k"], ["resolution", "2k"]]) {
   test(`editing automatic ${field} saves the complete independent encoding choice`, async () => {
     const f = fixture({ enabled: true, encode_danmu: false, render_settings: defaults() });
-    await f.state.get_config();
+    await f.state.loadSettings();
     f.state.setting_model.auto_generate.render_settings[field] = value;
     const completion = f.state.updateAutoGenerate();
     assert.deepEqual(plain(f.requests[0].args), {
@@ -76,7 +76,7 @@ for (const [field, value] of [["codec", "h264"], ["priority", "quality"], ["bitr
     });
     f.requests[0].resolve();
     await completion;
-    await f.state.get_config();
+    await f.state.loadSettings();
     assert.deepEqual(plain(f.state.setting_model.auto_generate.render_settings), { ...defaults(), [field]: value });
   });
 }
@@ -84,7 +84,7 @@ for (const [field, value] of [["codec", "h264"], ["priority", "quality"], ["bitr
 test("disabling, re-enabling and changing danmaku preserve saved encoding settings", async () => {
   const settings = { codec: "h264", priority: "quality", bitrate_kbps: 20000, resolution: "original" };
   const f = fixture({ enabled: true, encode_danmu: false, render_settings: settings });
-  await f.state.get_config();
+  await f.state.loadSettings();
   for (const [enabled, danmu] of [[false, false], [true, false], [true, true]]) {
     f.state.setting_model.auto_generate.enabled = enabled;
     f.state.setting_model.auto_generate.encode_danmu = danmu;
@@ -99,7 +99,7 @@ test("disabling, re-enabling and changing danmaku preserve saved encoding settin
 
 test("pending saves use a settings snapshot and do not issue concurrent writes", async () => {
   const f = fixture({ enabled: true, encode_danmu: true, render_settings: defaults() });
-  await f.state.get_config();
+  await f.state.loadSettings();
   const completion = f.state.updateAutoGenerate();
   assert.equal(f.state.autoGenerateSaving, true);
   f.state.setting_model.auto_generate.render_settings.codec = "h264";
@@ -113,7 +113,7 @@ test("pending saves use a settings snapshot and do not issue concurrent writes",
 
 test("failed saves display an error and can retry the retained choices", async () => {
   const f = fixture({ enabled: true, encode_danmu: false, render_settings: defaults() });
-  await f.state.get_config();
+  await f.state.loadSettings();
   f.state.setting_model.auto_generate.render_settings.bitrate_kbps = 16000;
   const failed = f.state.updateAutoGenerate();
   f.requests[0].reject(new Error("disk unavailable"));

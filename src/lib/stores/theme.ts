@@ -1,6 +1,6 @@
 import { get, writable } from "svelte/store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { TAURI_ENV } from "../invoker";
+import { TAURI_ENV } from "../web-endpoint";
 
 // Light / dark theme of the main window. Preview windows are always dark and
 // do not read this.

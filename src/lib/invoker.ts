@@ -3,19 +3,7 @@ import { fetch as tauri_fetch } from "@tauri-apps/plugin-http";
 import { open as tauri_open } from "@tauri-apps/plugin-shell";
 import { onOpenUrl as tauri_onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { createEventClient } from "./events";
-
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: any;
-  }
-}
-
-function normalizeEndpoint(value: string): string {
-  return value.trim().replace(/\/+$/, "");
-}
-
-const ENDPOINT = normalizeEndpoint(localStorage.getItem("endpoint") || "");
-const TAURI_ENV = typeof window.__TAURI_INTERNALS__ !== "undefined";
+import { ENDPOINT, TAURI_ENV } from "./web-endpoint";
 
 const log = {
   error: (...args: any[]) => {
@@ -187,5 +175,4 @@ export {
   onOpenUrl,
   get_static_url,
   get_preview_audio_url,
-  normalizeEndpoint,
 };

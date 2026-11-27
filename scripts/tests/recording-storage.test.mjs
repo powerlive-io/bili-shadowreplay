@@ -706,14 +706,13 @@ test("generic desktop and HTTP invokers preserve storage wire keys and null over
   for (const tauri of [false, true]) {
     const requests = [];
     const context = vm.createContext({
-      window: tauri ? { __TAURI_INTERNALS__: {} } : {},
-      localStorage: { getItem: () => "http://server:3000" },
       fetch: async (url, options) => {
         requests.push({ command: url.split("/").pop(), args: JSON.parse(options.body) });
         return { ok: true, status: 200, json: async () => ({ code: 0, data: {} }) };
       },
     });
     const dependencies = {
+      "./web-endpoint": { ENDPOINT: "http://server:3000", TAURI_ENV: tauri },
       "@tauri-apps/api/core": { invoke: async (command, args) => { requests.push({ command, args: plain(args) }); return {}; } },
       "@tauri-apps/plugin-http": { fetch() {} },
       "@tauri-apps/plugin-shell": { open() {} },

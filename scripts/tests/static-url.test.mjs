@@ -8,14 +8,13 @@ async function loadInvoker({ tauri, endpoint = "", getStaticPort = async () => 4
   const tauriCalls = [];
   const fetches = [];
   const context = vm.createContext({
-    window: tauri ? { __TAURI_INTERNALS__: {} } : {},
-    localStorage: { getItem: (key) => (key === "endpoint" ? endpoint : null) },
     fetch: async (url) => {
       fetches.push(url);
       throw new Error("static URLs must not need an HTTP request");
     },
   });
   const dependencies = {
+    "./web-endpoint": { ENDPOINT: endpoint, TAURI_ENV: tauri },
     "@tauri-apps/api/core": {
       invoke: async (command) => {
         tauriCalls.push(command);
@@ -99,7 +98,7 @@ test("a failed shared port lookup is retried on the next request", async () => {
 });
 
 test("web static URLs follow the configured endpoint without a request", async () => {
-  const { invoker, fetches } = await loadInvoker({ tauri: false, endpoint: "https://bsr.example/base/" });
+  const { invoker, fetches } = await loadInvoker({ tauri: false, endpoint: "https://bsr.example/base" });
   assert.equal(
     await invoker.get_static_url("cache", "youtube/UCx/L1/cover.jpg"),
     "https://bsr.example/base/cache/youtube/UCx/L1/cover.jpg",

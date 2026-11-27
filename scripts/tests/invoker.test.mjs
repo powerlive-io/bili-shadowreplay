@@ -9,14 +9,13 @@ async function loadInvoker({ tauri = false } = {}) {
   const tauriCalls = [];
   const response = { content: "Hello", toolCalls: [] };
   const context = vm.createContext({
-    window: tauri ? { __TAURI_INTERNALS__: {} } : {},
-    localStorage: { getItem: () => "https://bsr.example/base/" },
     fetch: async (url, options) => {
       fetches.push({ url, ...options });
       return { ok: true, status: 200, json: async () => ({ code: 0, data: response }) };
     },
   });
   const dependencies = {
+    "./web-endpoint": { ENDPOINT: "https://bsr.example/base", TAURI_ENV: tauri },
     "@tauri-apps/api/core": {
       invoke: async (command, args) => {
         tauriCalls.push({ command, args });
