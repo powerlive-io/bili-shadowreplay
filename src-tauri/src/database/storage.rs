@@ -209,7 +209,9 @@ impl Database {
         credentials: &HashMap<String, StorageCredentials>,
     ) -> Result<(), DatabaseError> {
         self.ensure_storage_schema().await?;
-        let mut tx = self.pool.begin().await?;
+        // Reserve the writer before reading the enabled backends. Upgrading a
+        // read transaction can return SQLITE_BUSY without waiting for another writer.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing: std::collections::HashSet<String> =
             sqlx::query_scalar("SELECT storage_id FROM recording_storage_enabled")
                 .fetch_all(&mut *tx)
