@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::catalog::import::LegacyImportReport;
 use crate::database::catalog::runtime::Handle;
 use recording_catalog::{
     object_store::{
@@ -120,7 +121,31 @@ impl ArchiveStorage {
             .configuration_gate
             .try_write()
             .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "存储正在使用中"))?;
-        self.reconcile_catalogs(force, gate).await
+        self.reconcile_catalogs(force, None, gate).await.map(|_| ())
+    }
+
+    pub async fn sync_catalog(
+        self: &Arc<Self>,
+        id: String,
+    ) -> io::Result<Option<LegacyImportReport>> {
+        let storage = self.clone();
+        // Finish attaching even if the client leaves mid-request.
+        tokio::spawn(async move {
+            storage
+                .db
+                .ensure_catalog_startup_complete()
+                .map_err(database_error)?;
+            if storage.db.catalogs.get().is_none() {
+                return Err(io::Error::other("存储目录尚未初始化"));
+            }
+            let gate = storage
+                .configuration_gate
+                .try_write()
+                .map_err(|_| io::Error::other("存储正在使用中，请稍后重试"))?;
+            storage.reconcile_catalogs(true, Some(&id), gate).await
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     pub(super) async fn backend_in_use(&self, id: &str) -> io::Result<bool> {
@@ -141,6 +166,17 @@ impl ArchiveStorage {
         {
             return Ok(true);
         }
+        // On startup there are normally no mutation leases. Don't enumerate
+        // every historical recording merely to intersect it with an empty set.
+        if !self
+            .mutations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .any(|lock| lock.strong_count() > 0)
+        {
+            return Ok(false);
+        }
         let records = self
             .db
             .storage_transfer_recordings(id)
@@ -157,16 +193,20 @@ impl ArchiveStorage {
     pub(super) async fn reconcile_catalogs(
         &self,
         force: bool,
+        only: Option<&str>,
         gate: tokio::sync::RwLockWriteGuard<'_, ()>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<LegacyImportReport>> {
         if self
             .catalog_startup_deferred
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            return Ok(());
+            return Ok(None);
         }
         self.initialize().await?;
         let config = self.configuration().await?;
+        if only.is_some_and(|id| !config.backends.contains_key(id)) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "未配置此存储"));
+        }
         // An old file-transfer journal must finish under its original rules.
         // Recording/mutation leases also prevent freezing a moving legacy source.
         if self.db.catalogs.get().is_none() {
@@ -176,11 +216,11 @@ impl ArchiveStorage {
                 .await
                 .map_err(database_error)?
             {
-                return Ok(());
+                return Ok(None);
             }
             for id in config.backends.keys() {
                 if self.backend_in_use(id).await? {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -193,7 +233,15 @@ impl ArchiveStorage {
         }
         let mut reconnect = Vec::new();
         for id in config.backends.keys() {
+            if only.is_some_and(|selected| selected != id) {
+                continue;
+            }
             if self.backend_in_use(id).await? {
+                if only.is_some() {
+                    return Err(io::Error::other(
+                        "此存储正在使用中，请停止录制或等待操作完成",
+                    ));
+                }
                 continue;
             }
             let ready = self
@@ -203,13 +251,16 @@ impl ArchiveStorage {
                 .map_err(database_error)?
                 .iter()
                 .any(|status| status.alias == *id && status.ready);
-            let healthy_writer = ready
+            let healthy = ready
                 && runtime.handles.lock().await.get(id).is_some_and(|handle| {
-                    handle.writer.is_some()
+                    (handle.writer.is_some()
+                        || self
+                            .catalog_readonly
+                            .load(std::sync::atomic::Ordering::Acquire))
                         && handle.credential_revision.as_ref()
                             == config.credential_revisions.get(id)
                 });
-            if healthy_writer && !force {
+            if healthy && !force {
                 continue;
             }
             // Never refresh the compatibility projection across a pending move.
@@ -220,9 +271,13 @@ impl ArchiveStorage {
                 .map_err(database_error)?
                 .iter()
                 .any(|journal| journal.source_id == *id || journal.target_id == *id)
-                && runtime.handles.lock().await.contains_key(id)
             {
-                continue;
+                if only.is_some() {
+                    return Err(io::Error::other("请先完成此存储的录播转移"));
+                }
+                if runtime.handles.lock().await.contains_key(id) {
+                    continue;
+                }
             }
             // While producers are excluded, revoke access to this backend.
             // New recording IDs also fail writable() until attach succeeds.
@@ -238,26 +293,41 @@ impl ArchiveStorage {
         // A second refresh/config replacement cannot race this read guard.
         let _configuration = tokio::sync::RwLockWriteGuard::downgrade(gate);
         let results = futures::future::join_all(reconnect.into_iter().map(|id| async move {
-            if let Err(error) = self.attach_catalog(id).await {
-                self.db.startup_preview.discard(id);
-                self.db
-                    .catalog_failed(id, &error.to_string())
-                    .await
-                    .map_err(database_error)?;
-                log::warn!("Storage catalog {id} unavailable: {error}");
+            match self.attach_catalog(id, force, only.is_some()).await {
+                Ok(report) => Ok(report),
+                Err(error) => {
+                    self.db.startup_preview.discard(id);
+                    self.db
+                        .catalog_failed(id, &error.to_string())
+                        .await
+                        .map_err(database_error)?;
+                    log::warn!("Storage catalog {id} unavailable: {error}");
+                    if only.is_some() {
+                        Err(error)
+                    } else {
+                        Ok(None)
+                    }
+                }
             }
-            Ok::<_, io::Error>(())
         }))
         .await;
         // Join every scan before releasing configuration protection, including
         // when persisting an error for one backend fails.
+        let mut report = None;
         for result in results {
-            result?;
+            if let Some(import) = result? {
+                report = Some(import);
+            }
         }
-        Ok(())
+        Ok(report)
     }
 
-    async fn attach_catalog(&self, id: &str) -> io::Result<()> {
+    async fn attach_catalog(
+        &self,
+        id: &str,
+        rescan: bool,
+        manual_sync: bool,
+    ) -> io::Result<Option<LegacyImportReport>> {
         validate_catalog_namespace(id, &self.configuration().await?)?;
         let expected = self
             .db
@@ -275,27 +345,47 @@ impl ArchiveStorage {
         let readonly = self
             .catalog_readonly
             .load(std::sync::atomic::Ordering::Acquire);
+        if needs_import && (!manual_sync || readonly) {
+            return Err(io::Error::other(
+                "此存储有旧录播待迁移，请在可写实例的存储管理中点击「同步」",
+            ));
+        }
         let definition = self.configuration().await?.backends[id].clone();
         // Only a genuinely new local location may be initialized. A missing
         // known mount must not become an empty directory on a different disk.
         if definition.kind == "local" && expected.is_none() && !needs_import && !readonly {
             tokio::fs::create_dir_all(&definition.root).await?;
         }
+        let runtime = self.db.catalogs.get().expect("catalog runtime");
         let location = self.catalog_location(id).await?;
-        // Observe the actual remote JSON reads, not the later scan over the
-        // writer's fully populated in-memory catalog. Never expose a replaced root.
+        // Claim an existing UUID before allowing a new alias to access its
+        // local cache. A copied/replaced root must not overwrite another mount.
+        let expected = match expected {
+            Some(uuid) => Some(uuid.parse().map_err(io::Error::other)?),
+            None => match location.identity().await {
+                Ok(identity) => {
+                    self.db
+                        .catalog_mount_for_alias(id, identity.storage_uuid)
+                        .await
+                        .map_err(database_error)?;
+                    Some(identity.storage_uuid)
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            },
+        };
+        let location = location.with_local_cache(runtime.pool.clone(), expected, rescan);
+        // Preview active records from this verified mount as soon as they are
+        // available (local cache or cold scan), not after all writers attach.
         let observer = (cfg!(feature = "gui")
             && self.db.ensure_catalog_startup_complete().is_err())
         .then(|| {
             let db = self.db.clone();
             let alias = id.to_owned();
-            let expected = expected.clone();
             Arc::new(
-                move |uuid: uuid::Uuid, record: &recording_catalog::CatalogRecord| {
-                    if expected.as_ref().is_none_or(|id| *id == uuid.to_string()) {
-                        db.startup_preview.observe(&alias, record);
-                        db.notify_coalesced_change(crate::events::DataChange::Records);
-                    }
+                move |_: uuid::Uuid, record: &recording_catalog::CatalogRecord| {
+                    db.startup_preview.observe(&alias, record);
+                    db.notify_coalesced_change(crate::events::DataChange::Records);
                 },
             ) as recording_catalog::ScanObserver
         });
@@ -320,26 +410,34 @@ impl ArchiveStorage {
             .or_else(|| reader.as_ref().map(|reader| reader.identity().storage_uuid))
             .expect("opened catalog");
         let result = async {
-            if expected
-                .as_ref()
-                .is_some_and(|expected| expected != &uuid.to_string())
-            {
-                return Err(io::Error::other(
-                    "存储 UUID 已改变，拒绝将旧引用指向另一存储",
-                ));
-            }
-            if needs_import {
+            let mut present_before_import = std::collections::HashSet::new();
+            let report = if needs_import {
                 let writer = writer
                     .as_ref()
                     .ok_or_else(|| io::Error::other("旧录播迁移需要存储写入权限"))?;
-                self.db
-                    .prepare_legacy_catalog_import(id, uuid)
-                    .await
-                    .map_err(database_error)?;
-                self.db
-                    .resume_legacy_catalog_import(id, writer)
-                    .await
-                    .map_err(database_error)?;
+                // Media conversion is a separate pass. It must not rewrite even
+                // an already-published prefix while recovering a frozen plan.
+                present_before_import = writer.known_live_ids().await?;
+                Some(
+                    self.db
+                        .import_legacy_catalog(id, writer)
+                        .await
+                        .map_err(database_error)?,
+                )
+            } else {
+                None
+            };
+            if manual_sync {
+                if let Some(writer) = &writer {
+                    crate::migration::migration_methods::migrate_legacy_archives(
+                        &self.db,
+                        id,
+                        &self.store(id).await?,
+                        writer,
+                        &present_before_import,
+                    )
+                    .await?;
+                }
             }
             // A persisted JSON deletion marker survives a crash between metadata
             // publication and file removal. Retry only those explicit deletions.
@@ -371,10 +469,18 @@ impl ArchiveStorage {
                         .await?
                 }
             };
-            self.db
-                .rebuild_catalog_projection(mount, scan)
-                .await
-                .map_err(database_error)?;
+            let republish = rescan
+                || !self
+                    .db
+                    .catalog_projection_matches(&mount, &scan)
+                    .await
+                    .map_err(database_error)?;
+            if republish {
+                self.db
+                    .rebuild_catalog_projection(mount, scan, rescan)
+                    .await
+                    .map_err(database_error)?;
+            }
             let handle = Handle {
                 uuid,
                 writer: writer.clone(),
@@ -386,13 +492,11 @@ impl ArchiveStorage {
                     .get(id)
                     .cloned(),
             };
-            self.db
-                .catalogs
-                .get()
-                .expect("catalog runtime")
-                .attach(id.to_owned(), handle)
+            runtime
+                .attach(id.to_owned(), handle, republish)
                 .await
-                .map_err(database_error)
+                .map_err(database_error)?;
+            Ok(report)
         }
         .await;
         if result.is_err() {

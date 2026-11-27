@@ -1,5 +1,5 @@
 //! Storage-owned catalog migration/projection data layer.
-//! Startup freezes recorder creation before taking legacy snapshots. Production
+//! Manual sync detaches the selected storage before taking a legacy snapshot. Production
 //! metadata mutations use `runtime`; existing SQLite recording tables are its
 //! compatibility projection, not an ongoing source for re-import.
 use super::{record::RecordRow, summary::RecordSummaryRow, Database, DatabaseError};
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+pub mod import;
 pub mod preview;
 pub mod projection;
 pub mod runtime;
@@ -93,6 +94,14 @@ pub(super) fn legacy_record(
     row: RecordRow,
     summary: Option<RecordSummaryRow>,
 ) -> Result<CatalogRecord, DatabaseError> {
+    legacy_record_with_id(row, summary, Uuid::new_v4())
+}
+
+fn legacy_record_with_id(
+    row: RecordRow,
+    summary: Option<RecordSummaryRow>,
+    recording_id: Uuid,
+) -> Result<CatalogRecord, DatabaseError> {
     let created_at_ms = chrono::DateTime::parse_from_rfc3339(&row.created_at)
         .map(|date| date.timestamp_millis())
         .or_else(|_| {
@@ -137,7 +146,7 @@ pub(super) fn legacy_record(
             }),
     };
     Ok(CatalogRecord {
-        recording_id: Uuid::new_v4(),
+        recording_id,
         platform: row.platform,
         room_id: row.room_id,
         live_id: row.live_id,
@@ -155,14 +164,12 @@ impl Database {
     /// Atomically freeze legacy rows, completed results and generated UUIDs.
     /// A retry returns the original snapshot, never today's mutable old tables.
     /// Old rows, bindings, materials and operational tasks are untouched.
-    pub async fn prepare_legacy_catalog_import(
+    async fn prepare_legacy_catalog_import(
         &self,
         source_id: &str,
-        storage_uuid: Uuid,
+        inventory: &recording_catalog::ImportInventory,
     ) -> Result<ImportPlan, DatabaseError> {
-        if storage_uuid.is_nil() {
-            return Err(error("Invalid storage UUID"));
-        }
+        let storage_uuid = inventory.storage_uuid;
         self.ensure_storage_schema().await?;
         let mut tx = self.pool.begin().await?;
         if let Some(saved) = sqlx::query_scalar::<_, String>(
@@ -187,17 +194,17 @@ impl Database {
         if !configured {
             return Err(error("Legacy source is not configured"));
         }
-        let ambiguous: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT live_id FROM recording_records \
-            WHERE storage_backend_id=? GROUP BY live_id HAVING COUNT(*)>1)",
+        let duplicate: Option<String> = sqlx::query_scalar(
+            "SELECT live_id FROM recording_records \
+            WHERE storage_backend_id=? GROUP BY live_id HAVING COUNT(*)>1 LIMIT 1",
         )
         .bind(source_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if ambiguous {
-            return Err(error(
-                "旧库包含重复 live_id；请先消除歧义，迁移未修改任何录播",
-            ));
+        if let Some(live) = duplicate {
+            return Err(error(format!(
+                "旧库在 {source_id} 包含重复 live_id {live}；请先消除歧义，未修改存储"
+            )));
         }
         let transferring: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM recording_storage_transfers WHERE source_id = ?1 OR target_id = ?1)",
@@ -213,8 +220,13 @@ impl Database {
             count: 0,
             digest: ImportDigest::default(),
         };
-        // Keyset pages under one SQLite read transaction: no unbounded catalog
-        // allocation, and no network I/O while holding the database transaction.
+        if inventory.progress.as_ref().is_some_and(|p| !p.complete) {
+            return Err(error(
+                "存储有未完成的旧库导入，本机没有对应的冻结计划；请使用原实例续传",
+            ));
+        }
+        // Page the legacy rows in one transaction. The verified storage
+        // inventory is already in memory; no network I/O inside SQLite.
         let mut after: Option<String> = None;
         loop {
             let rows = sqlx::query_as::<_, RecordRow>(
@@ -232,7 +244,18 @@ impl Database {
                 let summary = sqlx::query_as::<_, RecordSummaryRow>(
                     "SELECT * FROM record_summaries WHERE platform = ? AND room_id = ? AND live_id = ? AND status = 'success'",
                 ).bind(&row.platform).bind(&row.room_id).bind(&row.live_id).fetch_optional(&mut *tx).await?;
-                let record = legacy_record(row, summary)?;
+                let target = inventory
+                    .resolve(&row.platform, &row.room_id, &row.live_id, None)
+                    .map_err(error)?;
+                let id = target
+                    .map(|t| t.record.recording_id)
+                    .unwrap_or_else(Uuid::new_v4);
+                let record = legacy_record_with_id(row, summary, id)?;
+                import::check_binding(&mut tx, source_id, storage_uuid, &record, id).await?;
+                if target.is_some() {
+                    import::save_match(&mut tx, &plan, &record, id, None).await?;
+                    continue;
+                }
                 plan.digest.append(&record).map_err(error)?;
                 sqlx::query("INSERT INTO catalog_legacy_entries (import_id, ordinal, record) VALUES (?, ?, ?)")
                     .bind(plan.import_id.to_string())
@@ -248,57 +271,6 @@ impl Database {
             .bind(source_id).bind(plan.import_id.to_string()).bind(storage_uuid.to_string()).bind(json(&plan)?)
             .execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(plan)
-    }
-
-    /// A remote commit can succeed before the local acknowledgement. The
-    /// storage-owned receipt makes this restart-safe, including after deletion.
-    pub async fn resume_legacy_catalog_import(
-        &self,
-        source_id: &str,
-        writer: &CatalogWriter,
-    ) -> Result<ImportPlan, DatabaseError> {
-        let saved: String =
-            sqlx::query_scalar("SELECT plan FROM catalog_legacy_imports WHERE source_id = ?")
-                .bind(source_id)
-                .fetch_one(&self.pool)
-                .await?;
-        let plan: ImportPlan = from_json(&saved)?;
-        let progress = writer.begin_import(plan.clone()).await.map_err(error)?;
-        if !progress.complete {
-            let mut index = progress.next_index;
-            while index < plan.count {
-                let rows: Vec<(i64, String)> = sqlx::query_as(
-                    "SELECT ordinal, record FROM catalog_legacy_entries \
-                     WHERE import_id = ? AND ordinal >= ? ORDER BY ordinal LIMIT 128",
-                )
-                .bind(plan.import_id.to_string())
-                .bind(i64::try_from(index).map_err(error)?)
-                .fetch_all(&self.pool)
-                .await?;
-                if rows.is_empty() {
-                    return Err(error("Legacy snapshot is incomplete"));
-                }
-                for (ordinal, bytes) in rows {
-                    if u64::try_from(ordinal).ok() != Some(index) {
-                        return Err(error("Legacy snapshot has a gap"));
-                    }
-                    writer
-                        .import_record(plan.clone(), index, from_json(&bytes)?)
-                        .await
-                        .map_err(error)?;
-                    index += 1;
-                }
-            }
-            writer.finish_import(plan.clone()).await.map_err(error)?;
-        }
-        sqlx::query(
-            "UPDATE catalog_legacy_imports SET complete = 1 WHERE import_id = ? AND plan = ?",
-        )
-        .bind(plan.import_id.to_string())
-        .bind(saved)
-        .execute(&self.pool)
-        .await?;
         Ok(plan)
     }
 }

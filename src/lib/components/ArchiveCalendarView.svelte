@@ -2,7 +2,7 @@
   import { onDestroy, type Snippet } from "svelte";
   import { ChevronLeft, ChevronRight, X } from "lucide-svelte";
   import {
-    ARCHIVE_CALENDAR_SPANS, buildArchiveCalendar, calendarDateKey, latestArchiveDate,
+    ARCHIVE_CALENDAR_SPANS, archiveCalendarCenter, buildArchiveCalendar, calendarDateKey, latestArchiveDate,
     type ArchiveCalendarEvent,
   } from "../archive-calendar";
   import { archiveKey } from "../archives";
@@ -39,7 +39,8 @@
   let viewportWidth = $state(0);
   let drag = $state<{ id: number; x: number; center: number; width: number; hours: number } | null>(null);
   const latest = $derived(latestArchiveDate(archives));
-  const layout = $derived(buildArchiveCalendar(archives, anchor ?? latest ?? Date.now(), spanHours, viewportWidth || 960));
+  const center = $derived(archiveCalendarCenter(anchor, latest));
+  const layout = $derived(buildArchiveCalendar(archives, center, spanHours, viewportWidth || 960));
   const laneLayout = $derived.by(() => {
     const heights = Array<number>(layout.lanes).fill(0);
     for (const event of layout.events) heights[event.lane] = Math.max(heights[event.lane], eventHeight(event));
@@ -53,7 +54,6 @@
     `${room.room_info.platform}:${room.room_info.room_id}`, room.user_info.user_name || room.room_info.room_id,
   ])));
 
-  $effect(() => { if (anchor === null && latest !== null) { const date = new Date(latest); date.setMinutes(0, 0, 0); anchor = date.getTime(); } });
   $effect(() => {
     menuOpen = selectedArchive !== null && selectedEvent !== undefined;
     if (selectedKey && (!selectedArchive || !selectedEvent)) selectedKey = null;
@@ -66,13 +66,13 @@
   function closeMenu() { const wasOpen = selectedKey !== null; selectedKey = null; if (wasOpen) trigger?.focus({ preventScroll: true }); }
   function eventHeight(event: ArchiveCalendarEvent) { return event.width >= 176 ? 54 : event.width >= 40 ? 72 : 24; }
   function navigate(date: number) { if (!Number.isFinite(new Date(date).getTime())) return; closeMenu(); anchor = date; }
-  function move(direction: number) { navigate((anchor ?? latest ?? Date.now()) + direction * spanHours * 3_600_000 / 2); }
+  function move(direction: number) { navigate(center + direction * spanHours * 3_600_000 / 2); }
   function zoom(hours: number) { closeMenu(); requestedSpanHours = hours; }
   function inputDate(timestamp: number) { const date = new Date(timestamp); return `${calendarDateKey(timestamp)}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`; }
   function startPan(event: PointerEvent) {
     if (event.button !== 0) return;
     closeMenu();
-    drag = { id: event.pointerId, x: event.clientX, center: anchor ?? latest ?? Date.now(), width: Math.max(1, viewportWidth), hours: spanHours };
+    drag = { id: event.pointerId, x: event.clientX, center, width: Math.max(1, viewportWidth), hours: spanHours };
     (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
   }
   function pan(event: PointerEvent) {
@@ -84,7 +84,7 @@
       const delta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
       if (!delta) return;
       event.preventDefault();
-      navigate((anchor ?? latest ?? Date.now()) + delta / Math.max(1, viewportWidth) * spanHours * 3_600_000);
+      navigate(center + delta / Math.max(1, viewportWidth) * spanHours * 3_600_000);
     };
     node.addEventListener("wheel", handler, { passive: false });
     return { destroy() { node.removeEventListener("wheel", handler); } };
@@ -166,7 +166,7 @@
       </div>
       <button class="ui-btn ui-btn-sm" onclick={() => navigate(Date.now())}>现在</button>
       <button class="ui-btn ui-btn-ghost ui-btn-sm" disabled={latest === null} onclick={() => latest !== null && navigate(latest)}>最近录播</button>
-      <input type="datetime-local" class="ui-input h-7 w-[162px] px-2 py-0 text-[11px]" aria-label="定位时间" value={inputDate(anchor ?? latest ?? Date.now())} onchange={(event) => { if (event.currentTarget.value) navigate(Date.parse(event.currentTarget.value)); }} />
+      <input type="datetime-local" class="ui-input h-7 w-[162px] px-2 py-0 text-[11px]" aria-label="定位时间" value={inputDate(center)} onchange={(event) => { if (event.currentTarget.value) navigate(Date.parse(event.currentTarget.value)); }} />
     </div>
     <div class="flex items-center gap-1.5 text-[11px] text-fg-muted">
       <span class="tabular-nums">该范围 {layout.count} 条</span>

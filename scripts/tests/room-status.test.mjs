@@ -30,7 +30,7 @@ function fixture(invoke, get = async () => { throw new Error("unexpected image r
       createObjectURL: (blob) => { const url = `blob:cover-${++urlId}`; createdUrls.set(url, blob); return url; },
       revokeObjectURL: (url) => revokedUrls.push(url),
     },
-    loadRoomArchives: async (scope, active) => {
+    loadRoomArchives: async (scope, { active }) => {
       const result = await invoke("get_archives", { platform: scope.platform, roomId: scope.room_id });
       return active() ? result : [];
     },

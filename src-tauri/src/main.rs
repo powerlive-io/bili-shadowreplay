@@ -44,11 +44,7 @@ use config::Config;
 use database::credentials::CredentialCipher;
 use database::Database;
 use events::EventBus;
-use migration::migration_methods::try_add_parent_id_to_records;
 use migration::migration_methods::try_convert_clip_covers;
-use migration::migration_methods::try_convert_entry_to_m3u8;
-use migration::migration_methods::try_convert_live_covers;
-use migration::migration_methods::try_rebuild_archives;
 use recorder_manager::RecorderManager;
 use simplelog::ConfigBuilder;
 use state::State;
@@ -727,6 +723,18 @@ fn get_migrations() -> Vec<Migration> {
             sql: "ALTER TABLE uploads ADD COLUMN cover_project TEXT NOT NULL DEFAULT '';",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 39,
+            description: "cache_complete_storage_catalog_documents",
+            sql: recording_catalog::CACHE_SCHEMA,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 40,
+            description: "preserve_legacy_catalog_adoptions",
+            sql: database::catalog::import::SCHEMA_SQL,
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -822,7 +830,7 @@ mod storage_migration_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 38);
+        assert_eq!(version, 40);
         let legacy_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
             .fetch_one(&pool)
             .await
@@ -939,11 +947,9 @@ async fn setup_server_state(args: Args) -> Result<State, Box<dyn std::error::Err
         webhook_poster.clone(),
     ));
 
-    let _ = try_rebuild_archives(&db, &recorder_manager).await;
-    let _ = try_convert_live_covers(&db, &recorder_manager).await;
-    let _ = try_convert_clip_covers(&db, config.read().await.output.clone().into()).await;
-    let _ = try_add_parent_id_to_records(&db).await;
-    let _ = try_convert_entry_to_m3u8(&db, &recorder_manager).await;
+    if !args.readonly {
+        let _ = try_convert_clip_covers(&db, config.read().await.output.clone().into()).await;
+    }
     recorder_manager
         .archive_storage()
         .start_catalogs(args.readonly)
@@ -1126,20 +1132,14 @@ async fn setup_app_state(app: &tauri::App) -> Result<Option<State>, Box<dyn std:
     Ok(Some(state))
 }
 
-/// Remote scans and legacy conversions run only after State is registered and
-/// the desktop setup can return. Keep recorder startup blocked until cutover.
+/// Load catalogs after State is registered so the desktop can show read-only
+/// previews while other mounts are connecting. Legacy recording import is manual.
 #[cfg(feature = "gui")]
 async fn initialize_app_catalogs(state: State) {
     let db = &state.db;
     let manager = &state.recorder_manager;
     let output_path = state.config.read().await.output.clone();
-    if let Err(error) = try_rebuild_archives(db, manager).await {
-        log::warn!("Rebuilding archive table failed: {error}");
-    }
-    let _ = try_convert_live_covers(db, manager).await;
     let _ = try_convert_clip_covers(db, output_path.clone().into()).await;
-    let _ = try_add_parent_id_to_records(db).await;
-    let _ = try_convert_entry_to_m3u8(db, manager).await;
     match manager.archive_storage().start_catalogs(false).await {
         Ok(()) => {
             db.catalog_startup_blocked
@@ -1251,6 +1251,7 @@ fn setup_invoke_handlers(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
         crate::handlers::account::get_qr,
         crate::handlers::config::get_config,
         crate::handlers::config::get_storage_catalog_status,
+        crate::handlers::config::sync_storage_catalog,
         crate::handlers::config::get_storage_initialization_status,
         crate::handlers::config::request_settings,
         crate::handlers::config::get_mcp_server_status,

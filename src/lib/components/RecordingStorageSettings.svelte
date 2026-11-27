@@ -7,7 +7,7 @@
   import StorageTransferSettings from "./StorageTransferSettings.svelte";
   import WebDavCredentialFields from "./WebDavCredentialFields.svelte";
   import S3CredentialFields from "./S3CredentialFields.svelte";
-  import { Check, FolderOpen, HardDrive, ListChecks, Plus, Trash2, X } from "lucide-svelte";
+  import { Check, FolderOpen, HardDrive, ListChecks, Plus, RefreshCw, Trash2, X } from "lucide-svelte";
   import { trapFocus } from "../focus-trap";
   import { mountToViewport } from "../actions/mountToViewport";
   import { pageVisibility } from "../page-visibility";
@@ -36,6 +36,7 @@
   let editingCredentials = $state<string | null>(null);
   let loading = $state(true);
   let saving = $state(false);
+  let syncingId = $state<string | null>(null);
   let error = $state("");
   let saved = $state("");
   let removingId = $state<string | null>(null);
@@ -79,6 +80,34 @@
     saved = "";
     await tick();
     newIdInput?.focus();
+  }
+
+  async function syncCatalog(id: string) {
+    if (saving || browsing || transferBusy) return;
+    saving = true;
+    syncingId = id;
+    error = "";
+    saved = "";
+    try {
+      const report = await invoke<{
+        inserted: number; adopted: number; skipped: number;
+        differences: { platform: string; room_id: string; live_id: string; fields: string[] }[];
+      } | null>("sync_storage_catalog", { id });
+      saved = `已从存储 ${id} 同步录播目录。`;
+      if (report) {
+        saved += `旧库记录：补入 ${report.inserted} 条，认领 ${report.adopted} 条，跳过已移除或转移的 ${report.skipped} 条。`;
+        if (report.differences.length) {
+          saved += "\n以下差异保留存储版本，旧值已保存在本机快照中：\n" +
+            report.differences.map(row => `${row.platform}/${row.room_id}/${row.live_id}：${row.fields.join("、")}`).join("\n");
+        }
+      }
+    } catch (e) {
+      error = `同步存储 ${id} 失败：${String(e)}`;
+    } finally {
+      await loadCatalogStatus();
+      syncingId = null;
+      saving = false;
+    }
   }
 
   async function setDefault(id: string) {
@@ -299,7 +328,7 @@
       {#if loading}
         <p class="py-10 text-center text-[12px] text-fg-muted" role="status">正在加载存储位置…</p>
       {:else if storage}
-        <p class="ui-hint">同一存储请只用一个 BSR 实例写入；切换机器前先停止原实例。</p>
+        <p class="ui-hint">同一存储请只用一个 BSR 实例写入。存储从其他实例迁回后，请先停止原实例，再点击「同步」。同步会重新加载目录，并在存储可写时迁移其中的旧录播。</p>
         <div hidden={view !== "locations"} inert={view !== "locations"}>
           <div class="mb-4 flex items-start justify-between gap-4">
             <div class="min-w-0">
@@ -388,7 +417,7 @@
                   <th class="w-[200px] whitespace-nowrap px-2 py-2 font-medium">名称</th>
                   <th class="w-[76px] whitespace-nowrap px-2 py-2 font-medium">类型</th>
                   <th class="px-2 py-2 font-medium">位置</th>
-                  <th class="w-[170px] whitespace-nowrap px-3 py-2 text-right font-medium">操作</th>
+                  <th class="w-[210px] whitespace-nowrap px-3 py-2 text-right font-medium">操作</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-line text-[12px]">
@@ -427,6 +456,11 @@
                     </td>
                     <td class="whitespace-nowrap px-3 py-2.5">
                       <div class="storage-actions flex items-center justify-end gap-1" role="group" aria-label={`${id} 的存储操作`}>
+                        <button class="ui-btn ui-btn-ghost ui-btn-sm" type="button"
+                          aria-label={`同步 ${id} 的录播目录`} title="重新扫描此存储并更新缓存；可写时同时迁移旧录播"
+                          disabled={saving || browsing || transferBusy || !storageBackendSupported(backend)} onclick={() => syncCatalog(id)}>
+                          <RefreshCw class={`h-3.5 w-3.5 ${syncingId === id ? "animate-spin" : ""}`} />同步
+                        </button>
                         {#if backend.type === "s3" || backend.type === "webdav"}
                           <button class="ui-btn ui-btn-ghost ui-btn-sm" disabled={saving || browsing || transferBusy} onclick={() => editCredentials(id)}>
                             {storage.credential_revisions?.[id] ? "更新凭证" : "填写凭证"}
@@ -497,8 +531,9 @@
           <button class="ui-btn ui-btn-sm mt-2" disabled={loading || saving || browsing || (storage !== null && transferBusy)} onclick={load}>重新加载配置</button>
         </div>
       {/if}
-      {#if saving}<p class="ui-hint" role="status">正在保存…</p>
-      {:else if saved}<p class="text-[12px] text-success-fg" role="status">{saved}</p>{/if}
+      {#if syncingId}<p class="ui-hint" role="status">正在扫描 {syncingId} 的录播目录…</p>
+      {:else if saving}<p class="ui-hint" role="status">正在保存…</p>
+      {:else if saved}<p class="max-h-48 overflow-auto whitespace-pre-wrap text-[12px] text-success-fg" role="status">{saved}</p>{/if}
     </div>
     <div class="ui-modal-footer">
       <button class="ui-btn" type="button" disabled={saving || browsing || transferStarting} onclick={close}>关闭</button>

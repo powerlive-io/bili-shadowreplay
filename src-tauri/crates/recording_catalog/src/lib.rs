@@ -12,9 +12,11 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
+mod cache;
+pub use cache::SCHEMA as CACHE_SCHEMA;
 mod lifecycle;
 mod migration;
-pub use migration::{ImportDigest, ImportPlan, ImportProgress};
+pub use migration::{ImportDigest, ImportInventory, ImportPlan, ImportProgress, ImportTarget};
 pub use object_store;
 
 const IDENTITY_PATH: &str = ".bsr/storage.json";
@@ -256,6 +258,7 @@ impl CatalogStore {
 pub struct CatalogLocation {
     store: CatalogStore,
     local_root: Option<PathBuf>,
+    cache: Option<cache::Cache>,
 }
 
 /// A provisional, read-only observation during opening. A later read or the
@@ -285,19 +288,37 @@ impl CatalogLocation {
         Ok(Self {
             store: CatalogStore::Objects(Arc::new(store)),
             local_root: Some(root),
+            cache: None,
         })
     }
     pub fn object_store(store: Arc<dyn ObjectStore>) -> Self {
         Self {
             store: CatalogStore::Objects(store),
             local_root: None,
+            cache: None,
         }
     }
     pub fn recording_backend(backend: Arc<dyn recording_storage::StorageBackend>) -> Self {
         Self {
             store: CatalogStore::Recording(backend),
             local_root: None,
+            cache: None,
         }
+    }
+    /// Share the application's local database, never the archive's filesystem.
+    /// Cache lookup happens only after the actual storage UUID is known.
+    pub fn with_local_cache(
+        mut self,
+        pool: sqlx::SqlitePool,
+        expected: Option<Uuid>,
+        rescan: bool,
+    ) -> Self {
+        self.cache = Some(cache::Cache {
+            pool,
+            expected,
+            rescan,
+        });
+        self
     }
     pub async fn identity(&self) -> io::Result<StorageIdentity> {
         let bytes = self.store.read_bounded(IDENTITY_PATH, 4096).await?;
@@ -307,6 +328,14 @@ impl CatalogLocation {
             return Err(invalid(
                 "unsupported catalog format or invalid storage UUID",
             ));
+        }
+        if self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.expected)
+            .is_some_and(|expected| expected != identity.storage_uuid)
+        {
+            return Err(invalid("存储 UUID 已改变，拒绝将旧引用指向另一存储"));
         }
         Ok(identity)
     }
@@ -438,21 +467,9 @@ impl CatalogLocation {
                     "storage already has a writer in this process",
                 )
             })?;
-        let documents = self
-            .load_documents(identity.storage_uuid, observer.as_ref())
+        let (documents, import) = self
+            .load_documents(identity.storage_uuid, observer.as_ref(), false)
             .await?;
-        let import = self.load_import().await?;
-        if import
-            .as_ref()
-            .is_some_and(|s| s.progress.plan.storage_uuid != identity.storage_uuid)
-        {
-            return Err(invalid("import belongs to another storage"));
-        }
-        if import.is_none() && documents.values().any(|doc| doc.import.is_some()) {
-            return Err(invalid(
-                "record receipts exist but import journal is missing",
-            ));
-        }
         Ok(CatalogWriter {
             identity: identity.clone(),
             inner: Arc::new(WriterInner {
@@ -469,6 +486,73 @@ impl CatalogLocation {
         })
     }
     async fn load_documents(
+        &self,
+        uuid: Uuid,
+        observer: Option<&ScanObserver>,
+        reader: bool,
+    ) -> io::Result<(BTreeMap<Uuid, Document>, Option<migration::ImportState>)> {
+        let started = std::time::Instant::now();
+        let cached = if let Some(cache) = &self.cache {
+            if cache.rescan {
+                cache.invalidate(uuid).await?;
+                None
+            } else {
+                cache.load(uuid).await?
+            }
+        } else {
+            None
+        };
+        // The caller already verified this storage's identity. Show only its
+        // active cached rows now, even if checking the import journal stalls.
+        if let (Some(docs), Some(notify)) = (&cached, observer) {
+            for doc in docs
+                .values()
+                .filter(|doc| doc.status == RecordStatus::Active)
+            {
+                notify(uuid, &doc.entry.record);
+            }
+        }
+        let import = self.load_import().await?;
+        if reader && import.as_ref().is_some_and(|s| !s.progress.complete) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "finish import before rebuilding the index",
+            ));
+        }
+        let scanned = cached.is_none();
+        let documents = match cached {
+            Some(docs) => docs,
+            None => self.scan_documents(uuid, observer).await?,
+        };
+        if reader && import != self.load_import().await? {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "import changed during scan",
+            ));
+        }
+        if import
+            .as_ref()
+            .is_some_and(|s| s.progress.plan.storage_uuid != uuid)
+            || (import.is_none() && documents.values().any(|doc| doc.import.is_some()))
+        {
+            return Err(invalid("import identity or journal mismatch"));
+        }
+        if let Some(cache) = self.cache.as_ref().filter(|_| scanned) {
+            cache.replace(uuid, &documents).await?;
+        }
+        let source = if scanned {
+            "storage_scan"
+        } else {
+            "sqlite_cache"
+        };
+        log::info!(
+            "Loaded recording catalog {uuid}: source={source} documents={} elapsed_ms={}",
+            documents.len(),
+            started.elapsed().as_millis()
+        );
+        Ok((documents, import))
+    }
+    async fn scan_documents(
         &self,
         uuid: Uuid,
         observer: Option<&ScanObserver>,
@@ -587,11 +671,21 @@ impl WriterState {
     }
     async fn persist(&mut self, document: Document) -> io::Result<()> {
         let id = document.entry.record.recording_id;
-        if let Err(error) = self
-            .location
-            .write_json(&record_path(id), &document, MAX_RECORD_BYTES)
-            .await
-        {
+        let cache = self.location.cache.as_ref();
+        if let Some(cache) = cache {
+            cache.invalidate(self.identity.storage_uuid).await?;
+        }
+        let result = async {
+            self.location
+                .write_json(&record_path(id), &document, MAX_RECORD_BYTES)
+                .await?;
+            if let Some(cache) = cache {
+                cache.update(&document).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
             self.failed = true;
             return Err(error);
         }
@@ -681,9 +775,10 @@ impl CatalogReader {
         if location.identity().await? != self.identity {
             return Err(invalid("storage identity changed"));
         }
-        location
-            .load_documents(self.identity.storage_uuid, observer)
-            .await
+        let (docs, _) = location
+            .load_documents(self.identity.storage_uuid, observer, true)
+            .await?;
+        Ok(docs)
     }
     pub async fn get(&self, id: Uuid) -> io::Result<Option<CatalogEntry>> {
         Ok(self
@@ -700,34 +795,7 @@ impl CatalogReader {
         self.scan_observed(None).await
     }
     pub async fn scan_observed(&self, observer: Option<&ScanObserver>) -> io::Result<CatalogScan> {
-        let location = self
-            .location
-            .as_ref()
-            .ok_or_else(|| invalid("catalog reader is closed"))?;
-        let import = location.load_import().await?;
-        if import
-            .as_ref()
-            .is_some_and(|state| !state.progress.complete)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "finish import before rebuilding the index",
-            ));
-        }
         let documents = self.documents(observer).await?;
-        if import != location.load_import().await? {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "import changed during scan",
-            ));
-        }
-        if import
-            .as_ref()
-            .is_some_and(|state| state.progress.plan.storage_uuid != self.identity.storage_uuid)
-            || (import.is_none() && documents.values().any(|doc| doc.import.is_some()))
-        {
-            return Err(invalid("import identity or journal mismatch"));
-        }
         Ok(make_scan(self.identity.storage_uuid, &documents))
     }
     pub async fn close(mut self) -> io::Result<()> {
@@ -741,6 +809,9 @@ pub struct CatalogScan {
     iterator: std::vec::IntoIter<CatalogEntry>,
 }
 impl CatalogScan {
+    pub fn entries(&self) -> &[CatalogEntry] {
+        self.iterator.as_slice()
+    }
     pub fn storage_uuid(&self) -> Uuid {
         self.storage_uuid
     }

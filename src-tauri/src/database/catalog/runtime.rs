@@ -261,14 +261,32 @@ impl Database {
         Ok(())
     }
 
+    /// Stray legacy media must never resurrect an archive removed by another
+    /// instance or claim a live_id already assigned to another recording.
+    pub async fn legacy_live_id_reserved(
+        &self,
+        alias: &str,
+        live: &str,
+    ) -> Result<bool, DatabaseError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM catalog_record_keys WHERE live_id=?1)
+            OR EXISTS(SELECT 1 FROM catalog_legacy_matches WHERE live_id=?1)
+            OR EXISTS(SELECT 1 FROM records WHERE live_id=?1)
+            OR EXISTS(SELECT 1 FROM recording_storage_deletions WHERE live_id=?1)
+            OR EXISTS(SELECT 1 FROM recording_storage_bindings WHERE live_id=?1 AND storage_id!=?2)")
+            .bind(live).bind(alias).fetch_one(&self.pool).await?)
+    }
+
     pub async fn catalog_needs_import(&self, alias: &str) -> Result<bool, DatabaseError> {
         // A persisted runtime UUID is the cutover marker. Losing a projection
         // row/link after that point is never permission to re-import SQLite.
-        Ok(sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM catalog_runtime_backends WHERE alias=? AND storage_uuid IS NOT NULL) \
-            AND (EXISTS(SELECT 1 FROM recording_records r \
-            WHERE storage_backend_id=? AND NOT EXISTS(SELECT 1 FROM catalog_record_links l WHERE l.live_id=r.live_id)) \
-            OR EXISTS(SELECT 1 FROM catalog_legacy_imports WHERE source_id=? AND complete=0))")
-            .bind(alias).bind(alias).bind(alias).fetch_one(&self.pool).await?)
+        // A link for the same live_id is not proof of cutover: it may belong to
+        // a different UUID. Only a published projection of this mount is proof.
+        Ok(sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM catalog_runtime_backends WHERE alias=?1 AND storage_uuid IS NOT NULL)
+            AND (EXISTS(SELECT 1 FROM catalog_legacy_imports WHERE source_id=?1 AND complete=0)
+              OR (EXISTS(SELECT 1 FROM recording_records WHERE storage_backend_id=?1)
+                AND NOT EXISTS(SELECT 1 FROM catalog_mounts m JOIN catalog_cache_heads h USING(storage_uuid)
+                    WHERE m.alias=?1 AND h.projected_epoch=m.epoch)))")
+            .bind(alias).fetch_one(&self.pool).await?)
     }
 }
 
@@ -363,6 +381,7 @@ impl CatalogRuntime {
         self: &Arc<Self>,
         alias: String,
         handle: Handle,
+        republish: bool,
     ) -> Result<(), DatabaseError> {
         let this = self.clone();
         tokio::spawn(async move {
@@ -370,7 +389,9 @@ impl CatalogRuntime {
             if handles.values().any(|other| other.uuid == handle.uuid) {
                 return Err(error("This storage UUID is already mounted"));
             }
-            this.publish_cache(&alias, handle.uuid).await?;
+            if republish {
+                this.publish_cache(&alias, handle.uuid).await?;
+            }
             sqlx::query("INSERT INTO catalog_runtime_backends(alias,storage_uuid,ready,writable,error) VALUES (?,?,1,?,NULL) \
                 ON CONFLICT(alias) DO UPDATE SET storage_uuid=excluded.storage_uuid,ready=1,writable=excluded.writable,error=NULL")
                 .bind(&alias).bind(handle.uuid.to_string()).bind(handle.writer.is_some()).execute(&this.pool).await?;
@@ -440,6 +461,8 @@ impl CatalogRuntime {
                 restore_summary(&mut tx, &entry.record).await?;
             }
         }
+        sqlx::query("UPDATE catalog_cache_heads SET projected_epoch=(SELECT epoch FROM catalog_mounts WHERE storage_uuid=?1) WHERE storage_uuid=?1")
+            .bind(uuid.to_string()).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -497,6 +520,7 @@ impl CatalogRuntime {
                 .await
                 .map_err(error)?
                 .ok_or(DatabaseError::NotFound)?;
+            let results_changed = matches!(change, Change::Results(_));
             match change {
                 Change::Delta(length, size) => {
                     if !length.is_finite() || length < 0.0 {
@@ -520,6 +544,11 @@ impl CatalogRuntime {
                 .map_err(error)?;
             let mut tx = this.pool.begin().await?;
             cache_entry(&mut tx, &alias, handle.uuid, &entry).await?;
+            if results_changed {
+                // The link revision certifies completed results too; never
+                // advance it while leaving a stale successful summary behind.
+                restore_summary(&mut tx, &entry.record).await?;
+            }
             tx.commit().await?;
             this.events.publish_coalesced_change(DataChange::Records);
             Ok(())

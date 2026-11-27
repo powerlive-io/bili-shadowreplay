@@ -10,6 +10,42 @@ pub struct CatalogMount {
 }
 
 impl Database {
+    /// A storage write and the compatibility projection cannot be committed
+    /// atomically. On reconnect, repair a crash between them from the local
+    /// document cache instead of rewriting every recording on every boot.
+    pub async fn catalog_projection_matches(
+        &self,
+        mount: &CatalogMount,
+        scan: &CatalogScan,
+    ) -> Result<bool, DatabaseError> {
+        let published: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM catalog_cache_heads WHERE storage_uuid=? AND projected_epoch=?)")
+            .bind(mount.storage_uuid.to_string()).bind(mount.epoch.to_string()).fetch_one(&self.pool).await?;
+        if !published {
+            return Ok(false);
+        }
+        let rows: Vec<(Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT l.recording_uuid,l.revision FROM recording_records r \
+             LEFT JOIN catalog_record_links l ON l.live_id=r.live_id AND l.storage_uuid=? \
+             WHERE r.storage_backend_id=?",
+        )
+        .bind(scan.storage_uuid().to_string())
+        .bind(&mount.alias)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() != scan.entries().len() {
+            return Ok(false);
+        }
+        let revisions: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .filter_map(|(id, revision)| Some((id?, revision?)))
+            .collect();
+        Ok(scan.entries().iter().all(|entry| {
+            revisions
+                .get(&entry.record.recording_id.to_string())
+                .is_some_and(|&revision| u64::try_from(revision) == Ok(entry.revision))
+        }))
+    }
+
     pub async fn mount_catalog(
         &self,
         alias: &str,
@@ -41,6 +77,7 @@ impl Database {
         &self,
         mount: CatalogMount,
         scan: CatalogScan,
+        allow_revision_reset: bool,
     ) -> Result<(), DatabaseError> {
         if scan.storage_uuid() != mount.storage_uuid {
             return Err(error("Catalog scan belongs to another storage"));
@@ -48,7 +85,7 @@ impl Database {
         let pool = self.pool.clone();
         tokio::spawn(async move {
             let generation = Uuid::new_v4().to_string();
-            let result = rebuild(&pool, &mount, &generation, scan).await;
+            let result = rebuild(&pool, &mount, &generation, scan, allow_revision_reset).await;
             // Only discard this attempt if it did not become the active head.
             // This also handles a lost SQLite commit acknowledgement.
             let cleanup = sqlx::query(
@@ -67,6 +104,7 @@ async fn rebuild(
     mount: &CatalogMount,
     generation: &str,
     mut scan: CatalogScan,
+    allow_revision_reset: bool,
 ) -> Result<(), DatabaseError> {
     let uuid = mount.storage_uuid.to_string();
     let revision = i64::try_from(scan.revision()).map_err(error)?;
@@ -94,10 +132,10 @@ async fn rebuild(
     let mut tx = pool.begin().await?;
     let changed = sqlx::query(
         "UPDATE catalog_projection_heads SET generation = ?1, revision = ?6 \
-         WHERE storage_uuid = ?2 AND generation IS ?3 AND revision <= ?6 \
+         WHERE storage_uuid = ?2 AND generation IS ?3 AND (revision <= ?6 OR ?7) \
          AND EXISTS(SELECT 1 FROM catalog_mounts WHERE alias = ?4 AND storage_uuid = ?2 AND epoch = ?5)",
     ).bind(generation).bind(&uuid).bind(&previous).bind(&mount.alias).bind(mount.epoch.to_string())
-        .bind(revision).execute(&mut *tx).await?.rows_affected();
+        .bind(revision).bind(allow_revision_reset).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
         return Err(error("Catalog mount or projection changed during refresh"));
     }

@@ -68,7 +68,7 @@ pub async fn get_storage_catalog_status(
         if let Err(error) = state
             .recorder_manager
             .archive_storage()
-            .refresh_catalogs(true)
+            .refresh_catalogs(false)
             .await
         {
             log::debug!("Storage catalog refresh deferred: {error}");
@@ -77,6 +77,19 @@ pub async fn get_storage_catalog_status(
     state
         .db
         .catalog_status()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg_attr(feature = "gui", tauri::command)]
+pub async fn sync_storage_catalog(
+    state: state_type!(),
+    id: String,
+) -> Result<Option<crate::database::catalog::import::LegacyImportReport>, String> {
+    state
+        .recorder_manager
+        .archive_storage()
+        .sync_catalog(id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -336,6 +349,105 @@ mod storage_settings_tests {
         assert!(!status.loading);
         assert!(status.error.is_none());
         assert!(state.db.ensure_catalog_startup_complete().is_ok());
+    }
+
+    #[tokio::test]
+    async fn archive_list_skips_webdav_reads_unless_calendar_requests_timing() {
+        use crate::handlers::recorder::get_archives;
+        use recorder::platforms::PlatformType;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let state = fixture(directory.path()).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().fallback({
+            let reads = reads.clone();
+            move |uri: axum::http::Uri| {
+                assert!(uri.path().ends_with("/playlist.m3u8"));
+                reads.fetch_add(1, Ordering::Relaxed);
+                async { "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T12:00:00Z\n#EXTINF:4,\n0.ts\n#EXT-X-ENDLIST\n" }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/dav/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let storage = state.recorder_manager.archive_storage();
+        let current = storage.configuration().await.unwrap();
+        let mut next = current.clone();
+        next.backends.insert(
+            "dav".into(),
+            RecordingBackendConfig {
+                kind: "webdav".into(),
+                root: String::new(),
+                s3: None,
+                webdav: Some(recording_storage::WebDavConfig {
+                    endpoint,
+                    prefix: String::new(),
+                }),
+            },
+        );
+        storage
+            .replace_configuration_with_credentials(
+                next,
+                &current,
+                &std::collections::HashMap::from([(
+                    "dav".into(),
+                    recording_storage::WebDavCredentials {
+                        username: "test".into(),
+                        password: "test".into(),
+                    }
+                    .into(),
+                )]),
+            )
+            .await
+            .unwrap();
+        for i in 0..100 {
+            let live = i.to_string();
+            state
+                .db
+                .bind_recording_storage("bilibili", "room", &live, "dav")
+                .await
+                .unwrap();
+            state
+                .db
+                .add_record(
+                    PlatformType::BiliBili,
+                    "parent",
+                    &live,
+                    "room",
+                    "title",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        for timing in [None, Some(false)] {
+            let rows = get_archives(state.clone(), "".into(), 0, 100, None, timing)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 100);
+            assert!(rows.iter().all(|row| row.record.storage_available
+                && row.recording_started_at.is_none()
+                && row.recording_ended_at.is_none()));
+            assert_eq!(reads.load(Ordering::Relaxed), 0);
+        }
+        let rows = get_archives(
+            state,
+            "room".into(),
+            0,
+            1,
+            Some("bilibili".into()),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows[0].recording_ended_at.unwrap() - rows[0].recording_started_at.unwrap(),
+            4000
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        server.abort();
     }
 
     #[tokio::test]

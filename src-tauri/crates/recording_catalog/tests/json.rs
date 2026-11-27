@@ -10,7 +10,10 @@ use recording_catalog::{
 };
 use std::{
     fmt, io,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use uuid::Uuid;
 
@@ -20,6 +23,8 @@ struct JsonOnlyStore {
     // Fail one selected write, either before or after it reaches storage.
     failure: Mutex<Option<(String, bool)>>,
     paused_read: Mutex<Option<(String, tokio::sync::oneshot::Receiver<()>)>>,
+    record_reads: AtomicUsize,
+    listings: AtomicUsize,
 }
 impl fmt::Display for JsonOnlyStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -70,6 +75,9 @@ impl ObjectStore for JsonOnlyStore {
         panic!("catalog JSON must not require multipart uploads")
     }
     async fn get_opts(&self, path: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
+        if path.as_ref().ends_with("/recording.json") {
+            self.record_reads.fetch_add(1, Ordering::Relaxed);
+        }
         assert!(opts.if_match.is_none() && opts.if_none_match.is_none());
         let pause = {
             let mut slot = self.paused_read.lock().unwrap();
@@ -91,6 +99,7 @@ impl ObjectStore for JsonOnlyStore {
         self.inner.delete_stream(paths)
     }
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.listings.fetch_add(1, Ordering::Relaxed);
         self.inner.list(prefix)
     }
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
@@ -119,6 +128,181 @@ fn record() -> CatalogRecord {
         cover: None,
         results: serde_json::Value::Null,
     }
+}
+
+#[tokio::test]
+async fn warm_writer_and_reader_skip_object_listing_and_reads_until_explicit_sync() {
+    let store = Arc::new(JsonOnlyStore::default());
+    let remote = CatalogLocation::object_store(store.clone());
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(recording_catalog::CACHE_SCHEMA)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let local = remote.clone().with_local_cache(pool.clone(), None, false);
+    let writer = local.open_writer(true).await.unwrap();
+    writer.close().await.unwrap();
+    let listings = store.listings.load(Ordering::Relaxed);
+    // Even a verified empty catalog is a cache hit.
+    let writer = local.open_writer(false).await.unwrap();
+    assert_eq!(store.listings.load(Ordering::Relaxed), listings);
+    let mut entry = writer.put(record(), None).await.unwrap();
+    entry.record.title = "Updated".into();
+    let updated = writer
+        .put(entry.record, Some(entry.revision))
+        .await
+        .unwrap();
+    let deleted = writer.put(record(), None).await.unwrap();
+    writer
+        .delete_recording(deleted.record.clone(), deleted.revision)
+        .await
+        .unwrap();
+    writer.close().await.unwrap();
+
+    let other = remote.open_writer(false).await.unwrap();
+    other
+        .delete(updated.record.recording_id, updated.revision)
+        .await
+        .unwrap();
+    let external = other.put(record(), None).await.unwrap();
+    other.close().await.unwrap();
+    let counts = || {
+        (
+            store.listings.load(Ordering::Relaxed),
+            store.record_reads.load(Ordering::Relaxed),
+        )
+    };
+    let before = counts();
+    let (release, wait) = tokio::sync::oneshot::channel();
+    *store.paused_read.lock().unwrap() = Some((".bsr/import.json".into(), wait));
+    let (tx, mut preview) = tokio::sync::mpsc::unbounded_channel();
+    let opening = tokio::spawn({
+        let local = local.clone();
+        async move {
+            local
+                .open_writer_observed(
+                    false,
+                    Some(Arc::new(move |uuid, row| {
+                        tx.send((uuid, row.recording_id)).unwrap();
+                    })),
+                )
+                .await
+        }
+    });
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(3), preview.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shown,
+        (writer.identity().storage_uuid, updated.record.recording_id)
+    );
+    assert!(
+        !opening.is_finished(),
+        "cached rows visible before import check completes"
+    );
+    release.send(()).unwrap();
+    let writer = opening.await.unwrap().unwrap();
+    assert!(
+        preview.try_recv().is_err(),
+        "tombstones are never previewed"
+    );
+    assert_eq!(
+        writer.scan().await.unwrap().entries(),
+        std::slice::from_ref(&updated)
+    );
+    assert_eq!(
+        local
+            .open_reader()
+            .await
+            .unwrap()
+            .scan()
+            .await
+            .unwrap()
+            .entries(),
+        &[updated]
+    );
+    assert_eq!(counts(), before, "no remote record I/O on warm opens");
+    assert_eq!(
+        writer.pending_deletions().await.unwrap(),
+        vec![deleted.record]
+    );
+    assert_eq!(
+        counts(),
+        (before.0, before.1 + 1),
+        "only the pending destructive operation is revalidated"
+    );
+    writer.close().await.unwrap();
+
+    let synced = remote
+        .with_local_cache(pool, None, true)
+        .open_writer(false)
+        .await
+        .unwrap();
+    assert_eq!(
+        synced.scan().await.unwrap().entries(),
+        std::slice::from_ref(&external)
+    );
+    synced.close().await.unwrap();
+    let after = counts();
+    assert!(after.0 > before.0 && after.1 > before.1);
+    assert_eq!(
+        local
+            .open_reader()
+            .await
+            .unwrap()
+            .scan()
+            .await
+            .unwrap()
+            .entries(),
+        &[external]
+    );
+    assert_eq!(counts(), after);
+}
+
+#[tokio::test]
+async fn interrupted_cache_commit_recovers_the_already_published_document() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(recording_catalog::CACHE_SCHEMA)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let local = CatalogLocation::object_store(Arc::new(JsonOnlyStore::default())).with_local_cache(
+        pool.clone(),
+        None,
+        false,
+    );
+    let writer = local.open_writer(true).await.unwrap();
+    let row = record();
+    sqlx::raw_sql("CREATE TRIGGER fail_insert BEFORE INSERT ON catalog_document_cache BEGIN SELECT RAISE(ABORT,'injected failure'); END")
+        .execute(&pool).await.unwrap();
+    assert!(writer.put(row.clone(), None).await.is_err());
+    assert!(writer.scan().await.is_err());
+    writer.close().await.unwrap();
+    sqlx::query("DROP TRIGGER fail_insert")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        local
+            .open_writer(false)
+            .await
+            .unwrap()
+            .get(row.recording_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .record,
+        row
+    );
 }
 
 #[tokio::test]

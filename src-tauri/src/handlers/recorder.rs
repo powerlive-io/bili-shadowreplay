@@ -336,21 +336,14 @@ pub async fn get_archives(
     offset: i64,
     limit: i64,
     platform: Option<String>,
+    include_timing: Option<bool>,
 ) -> Result<Vec<ArchiveRecord>, String> {
-    if state.db.ensure_catalog_startup_complete().is_err() {
-        return Ok(state
+    let records = if state.db.ensure_catalog_startup_complete().is_err() {
+        state
             .db
             .startup_preview
             .page(&room_id, platform.as_deref(), offset, limit)
-            .into_iter()
-            .map(|record| ArchiveRecord {
-                record,
-                recording_started_at: None,
-                recording_ended_at: None,
-            })
-            .collect());
-    }
-    let records = if let Some(platform) = platform {
+    } else if let Some(platform) = platform {
         let platform = PlatformType::from_str(&platform).map_err(|error| error.to_string())?;
         state
             .db
@@ -364,7 +357,10 @@ pub async fn get_archives(
             .get_archives(&room_id, offset, limit)
             .await?
     };
-    Ok(state.recorder_manager.archive_records(records).await)
+    Ok(state
+        .recorder_manager
+        .archive_records(records, include_timing.unwrap_or(false))
+        .await)
 }
 
 #[cfg_attr(feature = "gui", tauri::command)]

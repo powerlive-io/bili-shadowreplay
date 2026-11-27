@@ -331,7 +331,7 @@ impl ArchiveStorage {
             .catalog_started
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            self.reconcile_catalogs(false, _gate).await?;
+            self.reconcile_catalogs(false, None, _gate).await?;
         }
         Ok(saved)
     }

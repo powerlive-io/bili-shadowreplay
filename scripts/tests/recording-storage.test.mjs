@@ -60,7 +60,7 @@ async function settingsFixture({ mount = false, overrides = {} } = {}) {
     storageBackendSupported,
     transferBusy: false, transferStarting: false,
     view: "locations", showAdd: false,
-    catalogStatuses: {}, catalogRequest: 0, disposed: false,
+    catalogStatuses: {}, catalogRequest: 0, disposed: false, syncingId: null,
     tick: async () => {}, newIdInput: { focus() {} },
     invoke: async (command, args) => {
       if (command === "get_config") return { storage: plain(persisted) };
@@ -213,6 +213,36 @@ test("every storage list and selector uses the shared stable ordering", async ()
     assert.match(source, /\{#each storageBackendEntries\(storage\)/);
     assert.doesNotMatch(source, /\{#each Object.entries\(storage.backends\)/);
   }
+});
+
+test("manual sync targets one storage and reports busy or scan failures without changing config", async () => {
+  const { state } = await settingsFixture();
+  const calls = [];
+  let finish;
+  state.invoke = async (command, args) => {
+    if (command === "get_storage_catalog_status") return [];
+    calls.push([command, plain(args)]);
+    await new Promise(resolve => { finish = resolve; });
+    return { inserted: 2, adopted: 98, skipped: 1,
+      differences: [{ platform: "bilibili", room_id: "123", live_id: "L", fields: ["标题", "摘要"] }] };
+  };
+  const syncing = state.syncCatalog("archive");
+  assert.equal(state.syncingId, "archive");
+  assert.equal(state.saving, true);
+  await state.syncCatalog("local");
+  finish();
+  await syncing;
+  assert.deepEqual(calls, [["sync_storage_catalog", { id: "archive" }]]);
+  assert.match(state.saved, /archive/);
+  assert.match(state.saved, /补入 2 条，认领 98 条，跳过已移除或转移的 1 条/);
+  assert.match(state.saved, /bilibili\/123\/L：标题、摘要/);
+  state.invoke = async () => { throw new Error("正在使用中"); };
+  await state.syncCatalog("archive");
+  assert.match(state.error, /正在使用中/);
+  assert.equal(state.saved, "");
+  assert.equal(state.syncingId, null);
+  assert.equal(state.saving, false);
+  assert.deepEqual(plain(state.storage), config());
 });
 
 test("catalog status reads do not reconnect unless refresh is requested", async () => {
