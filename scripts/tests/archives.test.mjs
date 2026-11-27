@@ -49,7 +49,7 @@ test("the first archive page is visible while the next page is still pending", {
   const api = await loadModule(async (_command, { offset }) => offset ? lastPage : rows.slice(0, 100));
   let published;
   const firstPage = new Promise(resolve => { published = resolve; });
-  const pending = api.loadRoomArchives(room, () => true, published);
+  const pending = api.loadRoomArchives(room, { onProgress: published });
   const preview = await firstPage;
   assert.equal(preview.length, 100);
   release(rows.slice(100));
@@ -65,7 +65,7 @@ test("closing during a page request prevents later requests and cover work", asy
     active = false;
     return Array.from({ length: 100 }, (_, index) => record(index));
   });
-  const result = await api.loadRoomArchives(room, () => active);
+  const result = await api.loadRoomArchives(room, { active: () => active });
   assert.equal(calls, 1);
   assert.equal(result.length, 0);
 });
@@ -78,6 +78,18 @@ test("a server repeating the same full page cannot create duplicates or an endle
   });
   assert.equal((await api.loadRoomArchives(room)).length, 100);
   assert.equal(calls, 2);
+});
+
+test("only a caller that needs wall-clock coverage opts in on every archive page", async () => {
+  const requested = [];
+  const rows = Array.from({ length: 102 }, (_, index) => record(index));
+  const api = await loadModule(async (_command, args) => {
+    requested.push(args.includeTiming);
+    return rows.slice(args.offset, args.offset + args.limit);
+  });
+  await api.loadRoomArchives(null);
+  await api.loadRoomArchives(room, { includeTiming: true });
+  assert.deepEqual(requested, [undefined, undefined, true, true]);
 });
 
 test("sorting works across the full archive collection with stable ties and no mutation", async () => {

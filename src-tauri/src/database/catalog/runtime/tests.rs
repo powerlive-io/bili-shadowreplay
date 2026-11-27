@@ -8,6 +8,8 @@ use crate::{
 use recorder::platforms::PlatformType;
 use tokio::sync::RwLock;
 
+mod import;
+
 async fn fixture() -> (
     tempfile::TempDir,
     Arc<Database>,
@@ -92,6 +94,208 @@ async fn close(db: &Database) {
     for alias in aliases {
         runtime.detach(&alias).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn restart_uses_local_catalog_until_syncing_the_selected_storage() {
+    let (root, db, storage, config) = fixture().await;
+    storage.start_catalogs(false).await.unwrap();
+    create(&db, &storage, "first", "a").await;
+    close(&db).await;
+    let remote = storage.catalog_location("a").await.unwrap();
+    let other = remote.open_writer(false).await.unwrap();
+    let old = other
+        .find_recording("bilibili", "123", "first")
+        .await
+        .unwrap()
+        .unwrap();
+    other
+        .delete(old.record.recording_id, old.revision)
+        .await
+        .unwrap();
+    let mut new = old.record;
+    new.live_id = "second".into();
+    new.recording_id = Uuid::new_v4();
+    other.put(new.clone(), None).await.unwrap();
+    other.close().await.unwrap();
+
+    let reopened = Arc::new(Database::new(
+        db.pool.clone(),
+        CredentialCipher::new(&[9; 32]).unwrap(),
+        EventBus::new(),
+    ));
+    let restored = Arc::new(ArchiveStorage::new(reopened.clone(), config));
+    restored.start_catalogs(false).await.unwrap();
+    assert_ready(&reopened).await;
+    assert_eq!(reopened.get_record("123", "first").await.unwrap().size, 15);
+    assert!(reopened.get_record("123", "second").await.is_err());
+    let unrelated = reopened.catalogs.get().unwrap().handles.lock().await["b"]
+        .writer
+        .clone()
+        .unwrap();
+    let busy = restored
+        .try_lock_recording("bilibili", "123", "first")
+        .unwrap();
+    assert!(restored.sync_catalog("a".into()).await.is_err());
+    drop(busy);
+    restored.sync_catalog("a".into()).await.unwrap();
+    assert!(reopened.get_record("123", "first").await.is_err());
+    assert!(
+        reopened
+            .get_record("123", "second")
+            .await
+            .unwrap()
+            .storage_available
+    );
+    assert!(
+        unrelated.scan().await.is_ok(),
+        "manual sync did not detach the other writer"
+    );
+
+    let documents = root.path().join("a/.bsr/records");
+    std::fs::write(
+        documents
+            .join(new.recording_id.to_string())
+            .join("recording.json"),
+        b"{bad",
+    )
+    .unwrap();
+    assert!(restored.sync_catalog("a".into()).await.is_err());
+    assert!(
+        !reopened
+            .get_record("123", "second")
+            .await
+            .unwrap()
+            .storage_available
+    );
+    // An operator can also intentionally restore an older (even empty) catalog.
+    std::fs::remove_dir_all(documents).unwrap();
+    restored.sync_catalog("a".into()).await.unwrap();
+    assert!(reopened.get_record("123", "second").await.is_err());
+    assert_ready(&reopened).await;
+    close(&reopened).await;
+}
+
+#[tokio::test]
+async fn only_manual_writable_sync_migrates_legacy_rows_and_media_on_one_storage() {
+    let (root, db, storage, _) = fixture().await;
+    let entry = b"segment.ts|1|2.0|4|1700000000|false\n";
+    for (alias, live) in [("a", "old"), ("a", "orphan"), ("b", "other")] {
+        let dir = root.path().join(alias).join("douyin/123").join(live);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("entries.log"), entry).unwrap();
+    }
+    for (live, contents) in [
+        ("damaged", &b"bad entry"[..]),
+        (".recording-transfer-stage-copy", &entry[..]),
+    ] {
+        let dir = root.path().join("a/douyin/123").join(live);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("entries.log"), contents).unwrap();
+    }
+    db.add_record(
+        PlatformType::Douyin,
+        "",
+        "old",
+        "123",
+        "Existing title",
+        Some("data:image/jpeg;base64,Y292ZXI=".into()),
+    )
+    .await
+    .unwrap();
+    storage.start_catalogs(false).await.unwrap();
+    storage.refresh_catalogs(false).await.unwrap();
+    let dir = root.path().join("a/douyin/123/old");
+    assert!(!dir.join("playlist.m3u8").exists());
+    assert!(!dir.join("cover.jpg").exists());
+    assert!(!db.get_record("123", "old").await.unwrap().storage_available);
+    assert!(db.get_record("123", "orphan").await.is_err());
+    storage.sync_catalog("a".into()).await.unwrap();
+    let old = db.get_record("123", "old").await.unwrap();
+    assert!(old.storage_available);
+    assert_eq!(
+        (old.title.as_str(), old.parent_id.as_str(), old.size),
+        ("Existing title", "old", 4)
+    );
+    assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), b"cover");
+    assert!(dir.join("playlist.m3u8").exists());
+    assert_eq!(db.get_record("123", "orphan").await.unwrap().length, 2.0);
+    assert_eq!(
+        std::fs::read(root.path().join("a/douyin/123/damaged/entries.log")).unwrap(),
+        b"bad entry"
+    );
+    assert!(db.get_record("123", "damaged").await.is_err());
+    assert!(db
+        .get_record("123", ".recording-transfer-stage-copy")
+        .await
+        .is_err());
+    assert!(db.get_record("123", "other").await.is_err());
+    assert!(!root
+        .path()
+        .join("b/douyin/123/other/playlist.m3u8")
+        .exists());
+
+    // A retired catalog entry can still have an entries.log. Even without
+    // a local UUID reservation, a later migration must not resurrect it.
+    let runtime = db.catalogs.get().unwrap();
+    let writer = runtime.handles.lock().await["a"].writer.clone().unwrap();
+    let orphan = writer
+        .find_recording("douyin", "123", "orphan")
+        .await
+        .unwrap()
+        .unwrap();
+    writer
+        .delete(orphan.record.recording_id, orphan.revision)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM catalog_record_keys WHERE live_id='orphan'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    storage.sync_catalog("a".into()).await.unwrap();
+    assert!(db.get_record("123", "orphan").await.is_err());
+    assert_eq!(db.get_record("123", "old").await.unwrap().length, 2.0);
+
+    close(&db).await;
+    storage.start_catalogs(true).await.unwrap();
+    storage.sync_catalog("b".into()).await.unwrap();
+    assert!(db.get_record("123", "other").await.is_err());
+    assert!(!root
+        .path()
+        .join("b/douyin/123/other/playlist.m3u8")
+        .exists());
+    close(&db).await;
+}
+
+#[tokio::test]
+async fn cached_deletion_cannot_remove_media_restored_by_another_instance() {
+    let (root, db, storage, _) = fixture().await;
+    storage.start_catalogs(false).await.unwrap();
+    create(&db, &storage, "restored", "a").await;
+    let runtime = db.catalogs.get().unwrap();
+    let (_, uuid) = runtime.resolve("restored").await.unwrap();
+    let document = root
+        .path()
+        .join(format!("a/.bsr/records/{uuid}/recording.json"));
+    let original = std::fs::read(&document).unwrap();
+    runtime.begin_delete("restored").await.unwrap();
+    close(&db).await;
+    std::fs::write(&document, original).unwrap();
+
+    storage.refresh_catalogs(false).await.unwrap();
+    assert!(
+        !db.get_record("123", "restored")
+            .await
+            .unwrap()
+            .storage_available
+    );
+    assert!(root
+        .path()
+        .join("a/bilibili/123/restored/video.ts")
+        .is_file());
+    storage.sync_catalog("a".into()).await.unwrap();
+    assert_ready(&db).await;
+    close(&db).await;
 }
 
 #[tokio::test]
@@ -269,9 +473,11 @@ async fn transfer(
 #[tokio::test]
 async fn production_catalog_writes_unmount_remount_and_alias_reuse() {
     let (root, db, storage, _) = fixture().await;
-    // Existing records and completed results migrate before normal recording starts.
+    // Legacy SQLite rows are preserved and the mount waits for an explicit sync.
     create(&db, &storage, "old", "a").await;
     storage.start_catalogs(false).await.unwrap();
+    assert!(!db.get_record("123", "old").await.unwrap().storage_available);
+    storage.sync_catalog("a".into()).await.unwrap();
     assert_ready(&db).await;
     create(&db, &storage, "new", "a").await;
     db.start_record_summary("bilibili", "123", "new", "task", false)
@@ -468,7 +674,7 @@ async fn stalled_remote_catalog_does_not_block_local_reads_or_recording_start() 
         let (_root, db, storage, _) = fixture().await;
         // The HTTP request stays pending until the assertions release it.
         // No real remote service or timing-dependent network timeout is needed.
-        let stall = Arc::new(AtomicBool::new(startup));
+        let stall = Arc::new(AtomicBool::new(false));
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let app = axum::Router::new().fallback({
@@ -491,6 +697,8 @@ async fn stalled_remote_catalog_does_not_block_local_reads_or_recording_start() 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        storage.start_catalogs(false).await.unwrap();
+        create(&db, &storage, "local", "a").await;
         let expected = storage.configuration().await.unwrap();
         let mut config = expected.clone();
         config.backends.insert(
@@ -520,11 +728,11 @@ async fn stalled_remote_catalog_does_not_block_local_reads_or_recording_start() 
             )
             .await
             .unwrap();
-        create(&db, &storage, "local", "a").await;
-        if !startup {
-            storage.start_catalogs(false).await.unwrap();
-            stall.store(true, Ordering::Release);
+        if startup {
+            close(&db).await;
+            db.catalog_startup_blocked.store(true, Ordering::Release);
         }
+        stall.store(true, Ordering::Release);
         let refreshing = tokio::spawn({
             let storage = storage.clone();
             async move {
@@ -551,6 +759,9 @@ async fn stalled_remote_catalog_does_not_block_local_reads_or_recording_start() 
                     break;
                 }
                 tokio::task::yield_now().await;
+            }
+            if cfg!(feature = "gui") && startup {
+                assert_eq!(db.startup_preview.page("", None, 0, 10)[0].live_id, "local");
             }
             let recording = storage.recording("bilibili", "123", "local").await.unwrap();
             assert_eq!(

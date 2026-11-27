@@ -49,3 +49,42 @@ test("the previous timeline preference opens the replacement calendar", async ()
   api.restoreArchiveViewPreference();
   assert.equal(get(api.archiveViewMode),"calendar");
 });
+
+test("hidden archive surfaces do not refresh and a late calendar page cannot replace the list", async () => {
+  const source = await readFile(new URL("../../src/lib/archive-list-refresh.ts", import.meta.url), "utf8");
+  const document = { visibilityState: "visible" };
+  const context = vm.createContext({ document });
+  const module = new vm.SourceTextModule(ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText, { context });
+  let watchers = 0;
+  await module.link(() => new vm.SyntheticModule(["createStateRefresh", "watchStateChanges"], function () {
+    this.setExport("createStateRefresh", run => ({ run }));
+    this.setExport("watchStateChanges", () => { watchers++; return () => { watchers--; }; });
+  }, { context }));
+  await module.evaluate();
+
+  const requests = [], published = [];
+  let finish;
+  const refresh = module.namespace.createArchiveListRefresh(async (view, active) => {
+    requests.push(view);
+    if (view === "calendar") await new Promise(resolve => { finish = resolve; });
+    if (active()) published.push(view);
+  }, ["records-changed"]);
+  refresh.watch(null);
+  await refresh.run();
+  assert.equal(watchers, 0);
+  const leaveCalendar = refresh.watch("calendar");
+  const pending = refresh.run();
+  leaveCalendar();
+  const leaveList = refresh.watch("list");
+  await refresh.run();
+  finish();
+  await pending;
+  document.visibilityState = "hidden";
+  await refresh.run();
+  leaveList();
+  assert.deepEqual(requests, ["calendar", "list"]);
+  assert.deepEqual(published, ["list"]);
+  assert.equal(watchers, 0);
+});

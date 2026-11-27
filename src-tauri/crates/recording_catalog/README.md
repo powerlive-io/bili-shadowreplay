@@ -11,6 +11,7 @@ distributed leases, a database server, compaction or metadata GC.
 .bsr/storage.json                         storage UUID, format_version = 2
 .bsr/records/<uuid>/recording.json        one current document per recording
 .bsr/import.json                          legacy SQLite import progress, if used
+.bsr/imports/<import uuid>.json           completed receipts retained before a later batch
 .bsr/writer.lock                          local filesystem lock only
 ```
 
@@ -52,6 +53,13 @@ complete SQLite projection rather than publish an empty index.
   publishing the SQLite index. This is O(record count), not a bounded-memory
   streaming database. A scan copies that view for stable pagination. Read-only
   remote scans compare listings before/after reads and reject concurrent changes.
+- The application keeps a local SQLite document cache per storage UUID. Warm
+  opens still verify storage identity and import state, but require no listing
+  or individual recording GETs. Pending destructive cleanup rechecks its marker.
+  Publishing invalidates the cache before the storage write, then commits the
+  verified document and completeness marker together; interrupted writes are
+  recovered by scanning on reconnect. After another instance has written to a
+  storage, use **Sync** for that storage before starting to record again.
 
 ## Format and SQLite import
 
@@ -60,10 +68,14 @@ and writers, including explicit initialization; it is never rewritten as an empt
 catalog. Catalog revisions come solely from current recording documents, including
 deletion/transfer markers. No separate revision floor or engine backup is read.
 
-The original main SQLite import still uses a frozen ordered snapshot. A record
-and its receipt publish together; import progress follows. Replaying a record
-after a failed progress write does not recreate or overwrite it. Incomplete
-imports cannot publish the aggregate index.
+Manual SQLite import preflights the entire frozen input against the storage
+and local identity bindings. It adopts existing recordings, skips tombstones,
+and journals only missing records. An adoption-only sync needs no remote import
+journal. For old in-flight plans a locally persisted adoption can acknowledge
+the original input without rewriting the storage document or changing the plan
+digest. A supplemental batch archives the previous completed journal under
+`.bsr/imports/<import UUID>.json`; incomplete foreign batches are never replaced.
+Incomplete imports still cannot publish the aggregate index.
 
 ## Validation
 

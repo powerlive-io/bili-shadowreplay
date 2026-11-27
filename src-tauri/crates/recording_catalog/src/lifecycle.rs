@@ -2,17 +2,44 @@
 use super::*;
 
 impl CatalogWriter {
-    /// Durable deletion markers are also the cleanup queue after a restart.
-    pub async fn pending_deletions(&self) -> io::Result<Vec<CatalogRecord>> {
+    /// Includes retired and deleted documents: leftover media isn't a new recording.
+    pub async fn known_live_ids(&self) -> io::Result<std::collections::HashSet<String>> {
         let guard = self.inner.state.lock().await;
         let state = guard.as_ref().ok_or_else(|| invalid("catalog is closed"))?;
         state.check()?;
         Ok(state
             .documents
             .values()
-            .filter(|d| d.status == RecordStatus::Deleted && !d.assets_removed)
-            .map(|d| d.entry.record.clone())
+            .map(|doc| doc.entry.record.live_id.clone())
             .collect())
+    }
+    /// Durable deletion markers are also the cleanup queue after a restart.
+    pub async fn pending_deletions(&self) -> io::Result<Vec<CatalogRecord>> {
+        let guard = self.inner.state.lock().await;
+        let state = guard.as_ref().ok_or_else(|| invalid("catalog is closed"))?;
+        state.check()?;
+        let mut pending = Vec::new();
+        for doc in state
+            .documents
+            .values()
+            .filter(|d| d.status == RecordStatus::Deleted && !d.assets_removed)
+        {
+            // Reconnect normally trusts the local cache, but a stale deletion
+            // must never erase media before the operator has a chance to sync.
+            if state.location.cache.is_some() {
+                let key = record_path(doc.entry.record.recording_id);
+                let bytes = state
+                    .location
+                    .store
+                    .read_bounded(&key, MAX_RECORD_BYTES)
+                    .await?;
+                if decode_document(&bytes, state.identity.storage_uuid, &key)? != *doc {
+                    return Err(invalid("存储上的删除标记已改变，请手动同步目录"));
+                }
+            }
+            pending.push(doc.entry.record.clone());
+        }
+        Ok(pending)
     }
 
     pub async fn finish_deletion(&self, id: Uuid) -> io::Result<()> {

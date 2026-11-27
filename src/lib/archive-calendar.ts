@@ -42,6 +42,16 @@ export function latestArchiveDate(records: readonly RecordItem[]): number | null
   return latest;
 }
 
+/** Until the user navigates, follow the latest archive as provisional list
+ * dates are replaced by actual segment timestamps. */
+export function archiveCalendarCenter(selected: number | null, latest: number | null): number {
+  if (selected !== null) return selected;
+  if (latest === null) return Date.now();
+  const date = new Date(latest);
+  date.setMinutes(0, 0, 0);
+  return date.getTime();
+}
+
 /** One continuous elapsed-time axis. Events are never split at midnight or assigned list rows. */
 export function buildArchiveCalendar(records: readonly RecordItem[], center: number, hours = 24, plotWidth = 960) {
   const width = Math.max(28, Math.min(16_000, Number.isFinite(plotWidth) ? plotWidth : 960));

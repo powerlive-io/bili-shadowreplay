@@ -16,7 +16,7 @@ const context = vm.createContext({});
 const linked = new Map();
 // Icons are decorative; their package expects Vite's extension resolution.
 const icons = Object.fromEntries(["ArrowRight", "ArrowRightLeft", "Check", "CircleAlert",
-  "FolderOpen", "HardDrive", "ListChecks", "Loader2", "Plus", "Trash2", "X"].map(name => [name, () => {}]));
+  "FolderOpen", "HardDrive", "ListChecks", "Loader2", "Plus", "RefreshCw", "Trash2", "X"].map(name => [name, () => {}]));
 async function dependency(name, dependencies) {
   return synthetic(name, name === "lucide-svelte" ? icons
     : name === "../recording-storage" ? recordingStorage : dependencies[name] ?? await import(name));
@@ -475,6 +475,7 @@ test("both settings views stay mounted with hidden/inert so background recovery 
     assert.match(body, /\/A/);
     assert.match(body, /class="ui-badge tabular-nums" aria-label="2 个存储位置">2<\/span>/);
     assert.match(body, /role="group" aria-label="B 的存储操作"[^>]*>[\s\S]*?移除<\/button><\/div>/);
+    assert.match(body, /aria-label="同步 B 的录播目录"/);
     assert.match(body, /group-hover:opacity-100[\s\S]{0,200}?设为默认/, "default switch only appears on row hover");
     assert.doesNotMatch(body, /id="new-storage-id"/, "add editor is absent until requested");
     if (view === "locations") {

@@ -49,8 +49,11 @@ export function sortArchives(records: RecordItem[], field: ArchiveSortField, ord
 /** Publish complete pages as they arrive, then return the full, deduplicated snapshot. */
 export async function loadRoomArchives(
   room: ArchiveRoom | null,
-  active: () => boolean = () => true,
-  onProgress?: (records: RecordItem[]) => void,
+  { active = () => true, onProgress, includeTiming = false }: {
+    active?: () => boolean;
+    onProgress?: (records: RecordItem[]) => void;
+    includeTiming?: boolean;
+  } = {},
 ): Promise<RecordItem[]> {
   const pageSize = 100;
   const records = new Map<string, RecordItem>();
@@ -60,6 +63,7 @@ export async function loadRoomArchives(
       roomId: room?.room_id ?? "",
       offset,
       limit: pageSize,
+      ...(includeTiming ? { includeTiming: true } : {}),
     });
     if (!active()) return [];
     const before = records.size;

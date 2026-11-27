@@ -94,7 +94,7 @@
       const init = await getStorageInitializationStatus();
       if (disposed) return;
       if (init.error) throw new Error(init.error);
-      const result = await loadRoomArchives(room.room_info, () => !disposed);
+      const result = await loadRoomArchives(room.room_info, { active: () => !disposed });
       if (disposed) return;
       archives = result;
       archiveSnapshot = init.loading ? "partial" : "complete";

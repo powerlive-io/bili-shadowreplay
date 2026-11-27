@@ -206,6 +206,56 @@ async fn corrupt_snapshots_and_foreign_namespaces_are_not_overwritten() {
 }
 
 #[tokio::test]
+async fn supplemental_import_preserves_completed_receipts_but_never_replaces_an_incomplete_plan() {
+    let root = tempfile::tempdir().unwrap();
+    let location = CatalogLocation::local(root.path()).unwrap();
+    let writer = location.open_writer(true).await.unwrap();
+    let original = record("old");
+    let first = plan(
+        writer.identity().storage_uuid,
+        std::slice::from_ref(&original),
+    );
+    writer.begin_import(first.clone()).await.unwrap();
+    let new = record("new");
+    let second = plan(writer.identity().storage_uuid, std::slice::from_ref(&new));
+    assert!(writer.begin_checked_import(second.clone()).await.is_err());
+    writer
+        .import_record(first.clone(), 0, original.clone())
+        .await
+        .unwrap();
+    writer.finish_import(first.clone()).await.unwrap();
+    let prior = std::fs::read(root.path().join(".bsr/import.json")).unwrap();
+    writer.begin_checked_import(second.clone()).await.unwrap();
+    assert_eq!(
+        std::fs::read(
+            root.path()
+                .join(format!(".bsr/imports/{}.json", first.import_id))
+        )
+        .unwrap(),
+        prior
+    );
+    writer.import_record(second.clone(), 0, new).await.unwrap();
+    writer.finish_import(second).await.unwrap();
+    let current = std::fs::read(root.path().join(".bsr/import.json")).unwrap();
+    writer.close().await.unwrap();
+    let reopened = location.open_writer(false).await.unwrap();
+    assert!(reopened.begin_checked_import(first).await.unwrap().complete);
+    assert_eq!(
+        std::fs::read(root.path().join(".bsr/import.json")).unwrap(),
+        current
+    );
+    assert_eq!(
+        reopened
+            .get(original.recording_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .record,
+        original
+    );
+}
+
+#[tokio::test]
 async fn streaming_scan_keeps_one_read_view_across_writes_and_deletions() {
     let writer = CatalogLocation::object_store(Arc::new(InMemory::new()))
         .open_writer(true)

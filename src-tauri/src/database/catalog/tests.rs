@@ -147,13 +147,17 @@ async fn frozen_legacy_snapshot_preserves_completed_results_and_survives_lost_ac
     let root = tempfile::tempdir().unwrap();
     let location = CatalogLocation::local(root.path()).unwrap();
     let writer = location.open_writer(true).await.unwrap();
+    let inventory = writer.import_inventory().await.unwrap();
     let plan = db
-        .prepare_legacy_catalog_import("legacy", writer.identity().storage_uuid)
+        .prepare_legacy_catalog_import("legacy", &inventory)
         .await
         .unwrap();
     assert_eq!(plan.count, 2);
     assert!(db
-        .prepare_legacy_catalog_import("legacy", Uuid::new_v4())
+        .prepare_legacy_catalog_import(
+            "legacy",
+            &self::writer().await.import_inventory().await.unwrap()
+        )
         .await
         .is_err());
     sqlx::query("UPDATE records SET title = 'Changed later', size = 900")
@@ -162,7 +166,7 @@ async fn frozen_legacy_snapshot_preserves_completed_results_and_survives_lost_ac
         .unwrap();
     assert_eq!(
         plan,
-        db.prepare_legacy_catalog_import("legacy", writer.identity().storage_uuid)
+        db.prepare_legacy_catalog_import("legacy", &inventory)
             .await
             .unwrap()
     );
@@ -188,7 +192,7 @@ async fn frozen_legacy_snapshot_preserves_completed_results_and_survives_lost_ac
     sqlx::raw_sql("CREATE TRIGGER reject_import_ack BEFORE UPDATE ON catalog_legacy_imports BEGIN SELECT RAISE(ABORT, 'simulated lost acknowledgement'); END;")
         .execute(&db.pool).await.unwrap();
     assert!(reopened
-        .resume_legacy_catalog_import("legacy", &writer)
+        .resume_legacy_catalog_import("legacy", &writer, &writer.import_inventory().await.unwrap())
         .await
         .is_err());
     assert!(writer.begin_import(plan.clone()).await.unwrap().complete);
@@ -225,7 +229,7 @@ async fn frozen_legacy_snapshot_preserves_completed_results_and_survives_lost_ac
         .await
         .unwrap();
     reopened
-        .resume_legacy_catalog_import("legacy", &writer)
+        .resume_legacy_catalog_import("legacy", &writer, &writer.import_inventory().await.unwrap())
         .await
         .unwrap();
     assert!(writer
@@ -258,7 +262,7 @@ async fn invalid_legacy_rows_rollback_the_whole_snapshot() {
         .await
         .unwrap();
     assert!(db
-        .prepare_legacy_catalog_import("legacy", Uuid::new_v4())
+        .prepare_legacy_catalog_import("legacy", &writer().await.import_inventory().await.unwrap())
         .await
         .is_err());
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM catalog_legacy_entries")
@@ -298,13 +302,13 @@ async fn projection_aggregates_by_uuid_and_unmount_never_deletes_content() {
         .is_err());
     assert!(db.mount_catalog("a", Uuid::new_v4()).await.is_err());
     assert!(db
-        .rebuild_catalog_projection(ma.clone(), b.scan().await.unwrap())
+        .rebuild_catalog_projection(ma.clone(), b.scan().await.unwrap(), false)
         .await
         .is_err());
-    db.rebuild_catalog_projection(ma.clone(), a.scan().await.unwrap())
+    db.rebuild_catalog_projection(ma.clone(), a.scan().await.unwrap(), false)
         .await
         .unwrap();
-    db.rebuild_catalog_projection(mb.clone(), b.scan().await.unwrap())
+    db.rebuild_catalog_projection(mb.clone(), b.scan().await.unwrap(), false)
         .await
         .unwrap();
     assert_eq!(projected_totals(&db).await, (2, 3.0, 84));
@@ -326,14 +330,14 @@ async fn projection_aggregates_by_uuid_and_unmount_never_deletes_content() {
         "cache restored by UUID under new alias"
     );
     assert!(db
-        .rebuild_catalog_projection(ma.clone(), stale_scan)
+        .rebuild_catalog_projection(ma.clone(), stale_scan, false)
         .await
         .is_err());
     assert!(
         unmount_catalog(&db, &mb).await.is_err(),
         "old alias incarnation cannot remove new mount"
     );
-    db.rebuild_catalog_projection(remounted, a.scan().await.unwrap())
+    db.rebuild_catalog_projection(remounted, a.scan().await.unwrap(), false)
         .await
         .unwrap();
     let cached = projected_records(&db, 0, 10).await;
@@ -351,7 +355,7 @@ async fn failed_refresh_keeps_last_complete_generation_then_recovers() {
         .mount_catalog("archive", writer.identity().storage_uuid)
         .await
         .unwrap();
-    db.rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap())
+    db.rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap(), false)
         .await
         .unwrap();
     for i in 0..130 {
@@ -361,7 +365,7 @@ async fn failed_refresh_keeps_last_complete_generation_then_recovers() {
     sqlx::raw_sql("CREATE TRIGGER reject_projection BEFORE INSERT ON catalog_projection_entries WHEN NEW.created_at_ms = 0 BEGIN SELECT RAISE(ABORT, 'injected page failure'); END;")
         .execute(&db.pool).await.unwrap();
     assert!(db
-        .rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap())
+        .rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap(), false)
         .await
         .is_err());
     let rows = projected_records(&db, 0, 1000).await;
@@ -379,7 +383,7 @@ async fn failed_refresh_keeps_last_complete_generation_then_recovers() {
     sqlx::raw_sql("CREATE TRIGGER reject_projection_publish BEFORE UPDATE ON catalog_projection_heads BEGIN SELECT RAISE(ABORT, 'injected publish failure'); END;")
         .execute(&db.pool).await.unwrap();
     assert!(db
-        .rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap())
+        .rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap(), false)
         .await
         .is_err());
     assert_eq!(projected_records(&db, 0, 1000).await[0].1, old);
@@ -392,7 +396,7 @@ async fn failed_refresh_keeps_last_complete_generation_then_recovers() {
         .delete(old.record.recording_id, old.revision)
         .await
         .unwrap();
-    db.rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap())
+    db.rebuild_catalog_projection(mount.clone(), writer.scan().await.unwrap(), false)
         .await
         .unwrap();
     assert_eq!(projected_totals(&db).await.0, 130);
@@ -402,7 +406,7 @@ async fn failed_refresh_keeps_last_complete_generation_then_recovers() {
             .await
             .unwrap();
     }
-    db.rebuild_catalog_projection(mount, writer.scan().await.unwrap())
+    db.rebuild_catalog_projection(mount, writer.scan().await.unwrap(), false)
         .await
         .unwrap();
     assert_eq!(
@@ -433,11 +437,11 @@ async fn old_scans_cannot_resurrect_a_newer_deletion() {
         new_scan.revision() > before,
         "deletion advances the scan watermark"
     );
-    db.rebuild_catalog_projection(mount.clone(), new_scan)
+    db.rebuild_catalog_projection(mount.clone(), new_scan, false)
         .await
         .unwrap();
     assert!(db
-        .rebuild_catalog_projection(mount, old_scan)
+        .rebuild_catalog_projection(mount, old_scan, false)
         .await
         .is_err());
     assert_eq!(projected_totals(&db).await, (0, 0.0, 0));
@@ -458,7 +462,7 @@ async fn import_snapshot_uses_bindings_and_excludes_deletion_tombstones() {
         .await
         .unwrap();
     let plan = db
-        .prepare_legacy_catalog_import("legacy", Uuid::new_v4())
+        .prepare_legacy_catalog_import("legacy", &writer().await.import_inventory().await.unwrap())
         .await
         .unwrap();
     assert_eq!(plan.count, 1);
@@ -521,28 +525,42 @@ async fn rustfs_catalog_import_projection_and_remount() {
         )
         .await
         .unwrap();
-    legacy(&db, "remote-live").await;
-    db.bind_recording_storage("bilibili", "123", "remote-live", "remote")
-        .await
-        .unwrap();
+    for live in ["remote-live", "already-on-storage"] {
+        legacy(&db, live).await;
+        db.bind_recording_storage("bilibili", "123", live, "remote")
+            .await
+            .unwrap();
+    }
     // The application adapter receives credentials from settings/SQLite only.
     let location = storage.catalog_location("remote").await.unwrap();
     let writer = location.open_writer(true).await.unwrap();
     let uuid = writer.identity().storage_uuid;
-    db.prepare_legacy_catalog_import("remote", uuid)
+    let existing = writer
+        .put(record("already-on-storage", 1000), None)
         .await
         .unwrap();
-    db.resume_legacy_catalog_import("remote", &writer)
+    let report = db.import_legacy_catalog("remote", &writer).await.unwrap();
+    assert_eq!((report.inserted, report.adopted), (1, 1));
+    assert_eq!(
+        writer
+            .get(existing.record.recording_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        existing
+    );
+    let imported = writer
+        .find_recording("bilibili", "123", "remote-live")
         .await
+        .unwrap()
         .unwrap();
-    let imported = writer.list(None, 10).await.unwrap().entries.remove(0);
     writer.close().await.unwrap();
     let reader = location.open_reader().await.unwrap();
     let mount = db.mount_catalog("remote", uuid).await.unwrap();
-    db.rebuild_catalog_projection(mount.clone(), reader.scan().await.unwrap())
+    db.rebuild_catalog_projection(mount.clone(), reader.scan().await.unwrap(), false)
         .await
         .unwrap();
-    assert_eq!(projected_totals(&db).await.0, 1);
+    assert_eq!(projected_totals(&db).await.0, 2);
     unmount_catalog(&db, &mount).await.unwrap();
     assert_eq!(projected_totals(&db).await.0, 0);
     assert!(reader
@@ -558,7 +576,7 @@ async fn rustfs_catalog_import_projection_and_remount() {
     let reader = location.open_reader().await.unwrap();
     let mount = restored.mount_catalog("renamed", uuid).await.unwrap();
     restored
-        .rebuild_catalog_projection(mount, reader.scan().await.unwrap())
+        .rebuild_catalog_projection(mount, reader.scan().await.unwrap(), false)
         .await
         .unwrap();
     assert_eq!(projected_records(&restored, 0, 10).await[0].1, imported);
@@ -569,7 +587,7 @@ async fn rustfs_catalog_import_projection_and_remount() {
         .delete(imported.record.recording_id, imported.revision)
         .await
         .unwrap();
-    db.resume_legacy_catalog_import("remote", &writer)
+    db.resume_legacy_catalog_import("remote", &writer, &writer.import_inventory().await.unwrap())
         .await
         .unwrap();
     assert!(writer

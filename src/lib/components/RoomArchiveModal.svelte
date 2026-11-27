@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { History, RefreshCw, X } from "lucide-svelte";
   import { loadRoomArchives } from "../archives";
+  import { createArchiveListRefresh } from "../archive-list-refresh";
+  import { archiveViewMode, type ArchiveViewMode } from "../stores/archive-view";
   import { getStorageInitializationStatus } from "../storage-initialization";
   import type { RecordItem } from "../db";
   import type { RecorderInfo } from "../interface";
   import { trapFocus } from "../focus-trap";
   import { pageVisibility } from "../page-visibility";
   import { platformLabel } from "../platform";
-  import { createStateRefresh, watchStateChanges } from "../state-refresh";
   import ArchiveList from "./ArchiveList.svelte";
 
   interface Props { room: RecorderInfo; onclose: () => void; }
@@ -17,38 +17,37 @@
   let loading = $state(true);
   let loadError = $state("");
   let dialogOpen = $state(false);
-  let disposed = false;
   const pageVisible = pageVisibility();
 
-  async function refreshArchives() {
+  async function refreshArchives(view: ArchiveViewMode, active: () => boolean) {
     loading = true;
     let initializing = false;
     try {
       const status = await getStorageInitializationStatus();
-      if (disposed) return;
+      if (!active()) return;
       initializing = status.loading;
       if (status.error) {
         loadError = `存储元数据加载失败：${status.error}，请重启应用重试。`;
         return;
       }
-      const result = await loadRoomArchives(room.room_info, () => !disposed,
-        archives.length ? undefined : records => { archives = records; });
-      if (disposed) return;
+      const result = await loadRoomArchives(room.room_info, {
+        active,
+        includeTiming: view === "calendar" && !initializing,
+        onProgress: archives.length ? undefined : records => { archives = records; },
+      });
+      if (!active()) return;
       archives = result;
       loadError = "";
     } catch (error) {
-      if (!disposed) loadError = `录播记录加载失败：${String(error)}`;
+      if (active()) loadError = `录播记录加载失败：${String(error)}`;
     } finally {
-      if (!disposed) loading = initializing;
+      if (active()) loading = initializing;
     }
   }
 
-  const stateRefresh = createStateRefresh(refreshArchives, 1000);
-  const refresh = () => stateRefresh.run();
-  onMount(() => {
-    const stop = watchStateChanges(stateRefresh, ["records-changed"]);
-    return () => { disposed = true; stop(); };
-  });
+  const archiveRefresh = createArchiveListRefresh(refreshArchives, ["records-changed"], 1000);
+  const refresh = archiveRefresh.run;
+  $effect(() => archiveRefresh.watch(pageVisible() ? $archiveViewMode : null));
 </script>
 
 <svelte:window onkeydown={(event) => {

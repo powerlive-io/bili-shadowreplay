@@ -242,6 +242,21 @@ struct CatalogStatusRequest {
     refresh: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct SyncStorageCatalogRequest {
+    id: String,
+}
+
+async fn handler_sync_storage_catalog(
+    state: axum::extract::State<State>,
+    Json(param): Json<SyncStorageCatalogRequest>,
+) -> Result<Json<ApiResponse<Option<crate::database::catalog::import::LegacyImportReport>>>, ApiError>
+{
+    Ok(Json(ApiResponse::success(
+        crate::handlers::config::sync_storage_catalog(state.0, param.id).await?,
+    )))
+}
+
 async fn handler_get_storage_catalog_status(
     state: axum::extract::State<State>,
     param: Option<Json<CatalogStatusRequest>>,
@@ -886,6 +901,7 @@ struct GetArchivesRequest {
     offset: i64,
     limit: i64,
     platform: Option<String>,
+    include_timing: Option<bool>,
 }
 
 async fn handler_get_archives(
@@ -898,6 +914,7 @@ async fn handler_get_archives(
         param.offset,
         param.limit,
         param.platform,
+        param.include_timing,
     )
     .await?;
     Ok(Json(ApiResponse::success(archives)))
@@ -3108,6 +3125,12 @@ pub async fn start_api_server(state: State) {
         .route(
             "/api/get_storage_catalog_status",
             post(handler_get_storage_catalog_status),
+        )
+        // A readonly server opens a catalog reader; sync refreshes only its
+        // local index, never imports metadata or cleans up storage objects.
+        .route(
+            "/api/sync_storage_catalog",
+            post(handler_sync_storage_catalog),
         )
         .route(
             "/api/get_mcp_server_status",

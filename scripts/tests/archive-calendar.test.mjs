@@ -9,7 +9,7 @@ const { outputText } = ts.transpileModule(source, { compilerOptions: { target: t
 const module = new vm.SourceTextModule(outputText, { context: vm.createContext({}) });
 await module.link(() => { throw new Error("Calendar geometry has no runtime dependencies"); });
 await module.evaluate();
-const { buildArchiveCalendar, calendarDateKey, latestArchiveDate } = module.namespace;
+const { archiveCalendarCenter, buildArchiveCalendar, calendarDateKey, latestArchiveDate } = module.namespace;
 const HOUR = 3_600_000;
 const at = (day, hour = 0, minute = 0) => new Date(2026, 10, day, hour, minute).getTime();
 const record = (id, start, length, changes = {}) => ({ platform: "bilibili", room_id: "123", live_id: id, parent_id: id, title: id, created_at: new Date(start).toISOString(), length, size: 1000, cover: null,
@@ -26,6 +26,14 @@ test("actual segment timestamps preserve skipped ads and override archive creati
   assert.equal(layout.events[0].width, 200);
   assert.equal(layout.events[0].timingKnown, true);
   assert.equal(latestArchiveDate([archive]), at(1, 10));
+});
+
+test("the automatic viewport follows timing hydration without overriding a manual selection", () => {
+  const cached = record("late-import", at(5, 9, 15), 3600, { recording_started_at: null, recording_ended_at: null });
+  const timed = { ...cached, recording_started_at: at(1, 10, 15), recording_ended_at: at(1, 11, 15) };
+  assert.equal(archiveCalendarCenter(null, latestArchiveDate([cached])), at(5, 9));
+  assert.equal(archiveCalendarCenter(null, latestArchiveDate([timed])), at(1, 10));
+  assert.equal(archiveCalendarCenter(at(3, 8, 30), latestArchiveDate([timed])), at(3, 8, 30));
 });
 
 test("missing or invalid segment times remain selectable without inventing an end from media duration", () => {

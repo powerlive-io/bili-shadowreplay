@@ -87,6 +87,8 @@ def main():
             ["-p", "recorder", "--lib",
              "danmu::writer_tests::batching::rustfs_batches_events_and_resumes_existing_log"],
             ["-p", "bili-shadowreplay", "--no-default-features", "--features", "headless",
+             "database::catalog::tests::rustfs_catalog_import_projection_and_remount"],
+            ["-p", "bili-shadowreplay", "--no-default-features", "--features", "headless",
              "database::catalog::runtime::tests::rustfs_production_catalog_transfers_all_directions_and_remounts"],
         ]
         for args in tests:

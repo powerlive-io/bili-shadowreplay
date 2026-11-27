@@ -2,11 +2,13 @@
   import { onMount } from "svelte";
   import { RefreshCw } from "lucide-svelte";
   import { loadRoomArchives } from "../lib/archives";
+  import { createArchiveListRefresh } from "../lib/archive-list-refresh";
+  import { archiveViewMode, type ArchiveViewMode } from "../lib/stores/archive-view";
+  import { pageVisibility } from "../lib/page-visibility";
   import type { RecordItem } from "../lib/db";
   import type { RecorderInfo, RecorderList } from "../lib/interface";
   import { invoke } from "../lib/invoker";
   import { getStorageInitializationStatus } from "../lib/storage-initialization";
-  import { createStateRefresh, watchStateChanges } from "../lib/state-refresh";
   import { registerCommands } from "../lib/stores/commands";
   import ArchiveList from "../lib/components/ArchiveList.svelte";
   import PageTitlebar from "../lib/components/PageTitlebar.svelte";
@@ -15,42 +17,41 @@
   let rooms: RecorderInfo[] = $state([]);
   let loading = $state(true);
   let loadError = $state("");
-  let disposed = false;
+  const pageVisible = pageVisibility();
 
-  async function fetchArchives() {
+  async function fetchArchives(view: ArchiveViewMode, active: () => boolean) {
     loading = true;
     let initializing = false;
     try {
       const status = await getStorageInitializationStatus();
-      if (disposed) return;
+      if (!active()) return;
       initializing = status.loading;
       if (status.error) {
         loadError = `存储元数据加载失败：${status.error}，请重启应用重试。`;
         return;
       }
       const recorders = await invoke<RecorderList>("get_recorder_list");
-      if (disposed) return;
+      if (!active()) return;
       rooms = recorders.recorders;
       loadError = "";
       // A mounted catalog may contain rooms never configured on this machine.
       // The recorder list labels filters; it must not determine which rows exist.
-      const records = await loadRoomArchives(null, () => !disposed,
-        archives.length ? undefined : rows => { archives = rows; });
-      if (!disposed) archives = records;
+      const records = await loadRoomArchives(null, {
+        active,
+        includeTiming: view === "calendar" && !initializing,
+        onProgress: archives.length ? undefined : rows => { archives = rows; },
+      });
+      if (active()) archives = records;
     } catch (error) {
-      if (!disposed) loadError = `录播记录加载失败：${String(error)}`;
+      if (active()) loadError = `录播记录加载失败：${String(error)}`;
     } finally {
-      if (!disposed) loading = initializing;
+      if (active()) loading = initializing;
     }
   }
 
-  const stateRefresh = createStateRefresh(fetchArchives);
-  const loadArchives = () => stateRefresh.run();
-
-  onMount(() => {
-    const stop = watchStateChanges(stateRefresh, ["records-changed", "recorders-changed"]);
-    return () => { disposed = true; stop(); };
-  });
+  const archiveRefresh = createArchiveListRefresh(fetchArchives, ["records-changed", "recorders-changed"]);
+  const loadArchives = archiveRefresh.run;
+  $effect(() => archiveRefresh.watch(pageVisible() ? $archiveViewMode : null));
   onMount(() => registerCommands([{
     id: "archive:refresh", group: "action", title: "刷新录播列表", detail: "录播",
     icon: RefreshCw, keywords: ["refresh archives", "reload"], page: "录播", run: loadArchives,

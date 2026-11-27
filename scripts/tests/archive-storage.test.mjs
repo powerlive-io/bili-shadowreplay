@@ -369,19 +369,21 @@ for (const [path, refresh] of [
       room: { room_info: { platform: "bilibili", room_id: "room" } },
       getStorageInitializationStatus: async () => status,
       invoke: async () => ({ recorders: [] }),
-      loadRoomArchives: async () => {
+      loadRoomArchives: async (_room, { includeTiming }) => {
+        assert.equal(includeTiming, !status.loading, "a calendar needs precise timing only after initialization");
         archiveReads++;
         if (status.loading) return [row("from-remote", false)];
         return await new Promise(resolve => { release = resolve; });
       },
     });
-    await state[refresh]();
+    const refreshCalendar = () => state[refresh]("calendar", () => true);
+    await refreshCalendar();
     assert.equal(state.loading, true, "loading must outlive the fast local status request");
     assert.equal(archiveReads, 1);
     assert.equal(state.archives[0].live_id, "from-remote");
 
     status = { loading: false, error: null };
-    const pending = state[refresh]();
+    const pending = refreshCalendar();
     for (let i = 0; i < 10; i++) await Promise.resolve();
     assert.equal(state.loading, true, "keep loading through the actual archive snapshot");
     release([row("loaded")]);
@@ -390,13 +392,13 @@ for (const [path, refresh] of [
     assert.equal(state.archives[0].live_id, "loaded");
 
     status = { loading: false, error: "catalog unavailable" };
-    await state[refresh]();
+    await refreshCalendar();
     assert.equal(state.loading, false);
     assert.match(state.loadError, /catalog unavailable/);
     assert.equal(archiveReads, 2);
 
     state.getStorageInitializationStatus = async () => { throw new Error("connection lost"); };
-    await state[refresh]();
+    await refreshCalendar();
     assert.equal(state.loading, false);
     assert.match(state.loadError, /connection lost/);
   });

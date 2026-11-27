@@ -1707,22 +1707,32 @@ impl RecorderManager {
         })
     }
 
-    pub async fn archive_records(&self, records: Vec<RecordRow>) -> Vec<ArchiveRecord> {
+    /// Ordinary list and statistics consumers must never resolve media storage.
+    /// Only the calendar needs the wall-clock intervals from the retained segments.
+    pub async fn archive_records(
+        &self,
+        records: Vec<RecordRow>,
+        include_timing: bool,
+    ) -> Vec<ArchiveRecord> {
         let mut archives = Vec::with_capacity(records.len());
         for record in records {
-            let timing = match self
-                .archive_storage
-                .recording(&record.platform, &record.room_id, &record.live_id)
-                .await
-            {
-                Ok(storage) => self.archive_timing.get_from_storage(&storage).await,
-                Err(error) => {
-                    log::warn!(
-                        "Failed to resolve archive timing storage for {}: {error}",
-                        record.live_id
-                    );
-                    None
+            let timing = if include_timing && record.storage_available {
+                match self
+                    .archive_storage
+                    .recording(&record.platform, &record.room_id, &record.live_id)
+                    .await
+                {
+                    Ok(storage) => self.archive_timing.get_from_storage(&storage).await,
+                    Err(error) => {
+                        log::warn!(
+                            "Failed to resolve archive timing storage for {}: {error}",
+                            record.live_id
+                        );
+                        None
+                    }
                 }
+            } else {
+                None
             };
             archives.push(ArchiveRecord {
                 record,
@@ -3189,7 +3199,7 @@ mod archive_storage_tests {
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].storage_backend_id, "archive");
             assert!(!list[0].storage_available);
-            let enriched = manager.archive_records(list).await;
+            let enriched = manager.archive_records(list, true).await;
             let json = serde_json::to_value(&enriched[0]).unwrap();
             assert_eq!(json["storage_backend_id"], "archive");
             assert_eq!(json["storage_available"], false);

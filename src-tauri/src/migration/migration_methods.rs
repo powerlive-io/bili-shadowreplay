@@ -1,194 +1,168 @@
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashSet},
+    io,
+    path::PathBuf,
+    sync::Arc,
+};
 
-use crate::database::{Database, DatabaseError};
-use crate::handlers::utils::decode_data_url;
-use crate::recorder_manager::RecorderManager;
-use recorder::entry::EntryStore;
-use recorder::platforms::PlatformType;
-use recording_storage::RecordingStorage;
+use crate::{database::Database, handlers::utils::decode_data_url};
+use recorder::{entry::EntryStore, platforms::PlatformType};
+use recording_catalog::{CatalogRecord, CatalogWriter};
+use recording_storage::{RecordingStorage, RecordingStore, LOG_METADATA_DIR};
 
-async fn recording_ids(storage: &RecordingStorage) -> std::io::Result<BTreeSet<String>> {
-    let mut live_ids = BTreeSet::new();
-    let mut cursor = None;
+/// Run only during an explicit writable sync, while the selected backend is
+/// detached. Write through the catalog writer, not the live recording API:
+/// importing media must not start a recording or reroute it to the default.
+pub async fn migrate_legacy_archives(
+    db: &Database,
+    alias: &str,
+    store: &RecordingStore,
+    writer: &CatalogWriter,
+    present_before_import: &HashSet<String>,
+) -> io::Result<()> {
+    // SQLite import (if needed) and remote scanning have already completed.
+    // Preserve their UUIDs, summaries and receipts when converting old fields.
+    let mut known = writer.known_live_ids().await?;
+    let adopted = db
+        .adopted_recording_ids(writer.identity().storage_uuid)
+        .await
+        .map_err(io::Error::other)?;
+    let mut scan = writer.scan().await?;
     loop {
-        let page = storage.list("", cursor.as_deref(), 1000).await?;
-        for key in page.keys {
-            if let Some((live, _)) = key.split_once('/') {
-                if !live.starts_with('.') {
-                    live_ids.insert(live.to_string());
-                }
+        let page = scan.next_page(128).await?;
+        if page.is_empty() {
+            break;
+        }
+        for entry in page {
+            let mut record = entry.record;
+            if present_before_import.contains(&record.live_id)
+                || adopted.contains(&record.recording_id)
+            {
+                continue; // Neither adoption nor recovery should rewrite existing JSON.
             }
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(live_ids),
-        }
-    }
-}
-
-/// An unreadable or malformed entry log is not evidence that an archive is
-/// empty. Only remove scopes containing no nonempty objects at all; retain
-/// media, covers and partial/corrupt logs for recovery.
-async fn confirmed_empty(storage: &RecordingStorage) -> std::io::Result<bool> {
-    let mut cursor = None;
-    loop {
-        let page = storage.list("", cursor.as_deref(), 1000).await?;
-        for key in page.keys {
-            if storage.size(&key).await? != 0 {
-                return Ok(false);
+            let media = store.recording(&record.platform, &record.room_id, &record.live_id)?;
+            let mut changed = false;
+            if record.parent_id.is_empty() {
+                record.parent_id.clone_from(&record.live_id);
+                changed = true;
             }
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(true),
-        }
-    }
-}
-
-pub async fn try_rebuild_archives(
-    db: &Arc<Database>,
-    manager: &Arc<RecorderManager>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    manager.archive_storage().initialize().await?;
-    let rooms = db.get_recorders().await?;
-    for room in rooms {
-        let room_id = room.room_id;
-        let platform = PlatformType::from_str(&room.platform)?;
-        let mut live_ids = BTreeSet::new();
-        for scope in manager
-            .archive_storage()
-            .room_stores(&room.platform, &room_id)
-            .await?
-        {
-            live_ids.extend(recording_ids(&scope).await?);
-        }
-        for live_id in live_ids {
-            let _mutation =
-                manager
-                    .archive_storage()
-                    .try_lock_recording(&room.platform, &room_id, &live_id)?;
-            let storage = manager
-                .recording_storage(platform, &room_id, &live_id)
-                .await?;
-            let entry_store = EntryStore::from_storage(&storage).await?;
-            let existing_record = match db.get_record(&room_id, &live_id).await {
-                Ok(record) => Some(record),
-                Err(DatabaseError::NotFound | DatabaseError::DB(sqlx::Error::RowNotFound)) => None,
-                Err(error) => return Err(error.into()),
-            };
-
-            if entry_store.is_empty() {
-                if existing_record
-                    .as_ref()
-                    .is_some_and(|record| record.size != 0)
-                {
-                    log::warn!("archive {}/{room_id}/{live_id} has database data but no entries; preserving it", room.platform);
-                } else if confirmed_empty(&storage).await? {
-                    storage.remove_all().await?;
-                    if existing_record.is_some() {
-                        db.remove_record(&live_id).await?;
+            if let Some(data) = record.cover.as_deref().filter(|v| v.starts_with("data:")) {
+                match decode_data_url(data) {
+                    Ok(bytes) => {
+                        media.write("cover.jpg", &bytes).await?;
+                        record.cover = Some(format!(
+                            "{}/{}/{}/cover.jpg",
+                            record.platform, record.room_id, record.live_id
+                        ));
+                        changed = true;
                     }
-                    log::info!(
-                        "removed confirmed-empty archive {}/{room_id}/{live_id}",
-                        room.platform
-                    );
+                    Err(error) => {
+                        log::warn!("Skipping invalid cover for {}: {error}", record.live_id)
+                    }
                 }
+            }
+            if (record.size == 0 || !media.exists("playlist.m3u8").await?)
+                && media.log_exists("entries.log").await?
+            {
+                let entries = EntryStore::from_storage(&media).await?;
+                if !entries.is_empty() {
+                    ensure_playlist(&media, &entries).await?;
+                    if record.size == 0
+                        && (record.length != entries.total_duration() || entries.total_size() != 0)
+                    {
+                        record.length = entries.total_duration();
+                        record.size = entries.total_size();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                writer.put(record, Some(entry.revision)).await?;
+            }
+        }
+    }
+
+    // A returned storage may contain rooms never configured on this machine.
+    // Only actual entry logs qualify. Don't delete empty/damaged directories
+    // or recreate tombstones from media left behind by a delete or transfer.
+    for platform in PlatformType::ALL {
+        let scope = store.scope(platform.as_str())?;
+        let mut candidates = BTreeSet::new();
+        let mut cursor = None;
+        loop {
+            let page = scope.list("", cursor.as_deref(), 1000).await?;
+            for key in page.keys {
+                let mut parts = key.splitn(3, '/');
+                if let (Some(room), Some(live), Some(file)) =
+                    (parts.next(), parts.next(), parts.next())
+                {
+                    if !room.starts_with('.')
+                        && !live.starts_with('.')
+                        && !known.contains(live)
+                        && (file == "entries.log"
+                            || file.split('/').next() == Some(LOG_METADATA_DIR))
+                    {
+                        candidates.insert((room.to_owned(), live.to_owned()));
+                    }
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        for (room, live) in candidates {
+            if known.contains(&live)
+                || db
+                    .legacy_live_id_reserved(alias, &live)
+                    .await
+                    .map_err(io::Error::other)?
+            {
                 continue;
             }
-
-            if let Some(record) = existing_record {
-                if record.size == 0 {
-                    db.update_record_delta(
-                        &live_id,
-                        entry_store.total_duration(),
-                        entry_store.total_size(),
-                    )
-                    .await?;
-                }
+            let media = store.recording(platform.as_str(), &room, &live)?;
+            let entries = EntryStore::from_storage(&media).await?;
+            if entries.is_empty() {
                 continue;
             }
-
-            let record = db
-                .add_record(
-                    platform,
-                    &live_id,
-                    &live_id,
-                    &room_id,
-                    &format!("UnknownLive {live_id}"),
+            ensure_playlist(&media, &entries).await?;
+            writer
+                .put(
+                    CatalogRecord {
+                        recording_id: uuid::Uuid::new_v4(),
+                        platform: platform.as_str().into(),
+                        room_id: room,
+                        live_id: live.clone(),
+                        parent_id: live.clone(),
+                        title: format!("UnknownLive {live}"),
+                        created_at_ms: chrono::Utc::now().timestamp_millis(),
+                        length: entries.total_duration(),
+                        size: entries.total_size(),
+                        cover: None,
+                        results: serde_json::Value::Null,
+                    },
                     None,
                 )
                 .await?;
-            db.update_record_delta(
-                &live_id,
-                entry_store.total_duration(),
-                entry_store.total_size(),
+            known.insert(live);
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_playlist(media: &RecordingStorage, entries: &EntryStore) -> io::Result<()> {
+    if !media.exists("playlist.m3u8").await? {
+        media
+            .write(
+                "playlist.m3u8",
+                entries.manifest(true, true, None).as_bytes(),
             )
             .await?;
-
-            log::info!("rebuild archive {record:?}");
-        }
     }
     Ok(())
 }
 
-pub async fn try_convert_live_covers(
-    db: &Arc<Database>,
-    manager: &Arc<RecorderManager>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    manager.archive_storage().initialize().await?;
-    let rooms = db.get_recorders().await?;
-    for room in rooms {
-        let room_id = room.room_id;
-        let records = db.get_records(&room_id, 0, 999_999_999).await?;
-        for record in &records {
-            let Some(cover) = record.cover.clone() else {
-                continue;
-            };
-            if cover.starts_with("data:") {
-                let _mutation = manager.archive_storage().try_lock_recording(
-                    &record.platform,
-                    &record.room_id,
-                    &record.live_id,
-                )?;
-                let bytes = match decode_data_url(&cover) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        log::warn!("Skipping invalid cover for {}: {e}", record.live_id);
-                        continue;
-                    }
-                };
-                // A recorder can replace another platform's room with the same
-                // ID; historical archives retain their own platform identity.
-                let platform = PlatformType::from_str(&record.platform)?;
-                let storage = manager
-                    .recording_storage(platform, &record.room_id, &record.live_id)
-                    .await?;
-                storage.write("cover.jpg", &bytes).await?;
-
-                log::info!(
-                    "convert live cover: {}/{}/{}",
-                    record.platform,
-                    record.room_id,
-                    record.live_id
-                );
-                // update record
-                db.update_record_cover(
-                    record.live_id.as_str(),
-                    Some(format!(
-                        "{}/{}/{}/cover.jpg",
-                        record.platform, record.room_id, record.live_id
-                    )),
-                )
-                .await?;
-            }
-        }
-    }
-    Ok(())
-}
-
+// Clip outputs are local project files, not recordings on a storage backend.
 pub async fn try_convert_clip_covers(
     db: &Arc<Database>,
     output_path: PathBuf,
@@ -216,224 +190,8 @@ pub async fn try_convert_clip_covers(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("Invalid cover path: {}", cover_file_path.display()))?;
-            // update record
             db.update_video_cover(video.id, cover_name).await?;
         }
     }
     Ok(())
-}
-
-pub async fn try_add_parent_id_to_records(
-    db: &Arc<Database>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let rooms = db.get_recorders().await?;
-    for room in &rooms {
-        let records = db.get_records(&room.room_id, 0, 999_999_999).await?;
-        for record in &records {
-            if record.parent_id.is_empty() {
-                db.update_record_parent_id(record.live_id.as_str(), record.live_id.as_str())
-                    .await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub async fn try_convert_entry_to_m3u8(
-    db: &Arc<Database>,
-    manager: &Arc<RecorderManager>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    manager.archive_storage().initialize().await?;
-    let rooms = db.get_recorders().await?;
-    for room in &rooms {
-        let records = db.get_records(&room.room_id, 0, 999_999_999).await?;
-        for record in &records {
-            let platform = PlatformType::from_str(&record.platform)?;
-            let _mutation = manager.archive_storage().try_lock_recording(
-                &record.platform,
-                &record.room_id,
-                &record.live_id,
-            )?;
-            let storage = manager
-                .recording_storage(platform, &record.room_id, &record.live_id)
-                .await?;
-            if !storage.log_exists("entries.log").await? || storage.exists("playlist.m3u8").await? {
-                continue;
-            }
-            let entry_store = EntryStore::from_storage(&storage).await?;
-            if entry_store.is_empty() {
-                continue;
-            }
-            let m3u8_content = entry_store.manifest(true, true, None);
-
-            storage
-                .write("playlist.m3u8", m3u8_content.as_bytes())
-                .await?;
-            log::info!(
-                "Convert entry to m3u8: {}/{}/{}",
-                record.platform,
-                record.room_id,
-                record.live_id
-            );
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(feature = "headless")]
-    #[tokio::test]
-    async fn conversions_keep_archive_platform_when_a_room_recorder_is_replaced() {
-        use crate::config::Config;
-        use crate::database::credentials::CredentialCipher;
-        use crate::events::EventBus;
-        use crate::task::TaskManager;
-        use crate::webhook::poster::{WebhookConfig, WebhookPoster};
-        use tokio::sync::RwLock;
-
-        let directory = tempfile::tempdir().unwrap();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::migrate::Migrator::new(crate::MigrationList(crate::get_migrations()))
-            .await
-            .unwrap()
-            .run(&pool)
-            .await
-            .unwrap();
-        let events = EventBus::new();
-        let db = Arc::new(Database::new(
-            pool,
-            CredentialCipher::new(&[0; 32]).unwrap(),
-            events.clone(),
-        ));
-        let mut config = Config::load(
-            &directory.path().join("config.toml"),
-            directory.path(),
-            directory.path(),
-        )
-        .unwrap();
-        config.storage = crate::config::StorageConfig::local(
-            directory
-                .path()
-                .join("cache")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let manager = Arc::new(RecorderManager::new(
-            events,
-            db.clone(),
-            Arc::new(RwLock::new(config)),
-            Arc::new(TaskManager::new()),
-            directory.path().into(),
-            WebhookPoster::new(WebhookConfig::default()).unwrap(),
-        ));
-        let room = "shared-room";
-        db.add_recorder_with_storage(PlatformType::BiliBili, room, "{}", None)
-            .await
-            .unwrap();
-        db.add_recorder_with_storage(PlatformType::Douyin, room, "{}", None)
-            .await
-            .unwrap();
-        for (platform, live) in [
-            (PlatformType::BiliBili, "historical"),
-            (PlatformType::Douyin, "current"),
-        ] {
-            db.add_record(
-                platform,
-                live,
-                live,
-                room,
-                "title",
-                Some("data:image/jpeg;base64,Y292ZXI=".into()),
-            )
-            .await
-            .unwrap();
-            let storage = manager
-                .recording_storage(platform, room, live)
-                .await
-                .unwrap();
-            storage
-                .write("entries.log", b"segment.ts|1|2.0|4|1700000000|false\n")
-                .await
-                .unwrap();
-        }
-
-        try_convert_live_covers(&db, &manager).await.unwrap();
-        try_convert_entry_to_m3u8(&db, &manager).await.unwrap();
-        for (platform, live) in [
-            (PlatformType::BiliBili, "historical"),
-            (PlatformType::Douyin, "current"),
-        ] {
-            let storage = manager
-                .recording_storage(platform, room, live)
-                .await
-                .unwrap();
-            assert_eq!(storage.read("cover.jpg").await.unwrap(), b"cover");
-            assert!(storage.exists("playlist.m3u8").await.unwrap());
-            assert_eq!(
-                db.get_record(room, live).await.unwrap().cover,
-                Some(format!("{}/{room}/{live}/cover.jpg", platform.as_str())),
-            );
-        }
-        let incorrect =
-            RecordingStorage::local(directory.path().join("cache/douyin/shared-room/historical"));
-        assert!(!incorrect.exists("cover.jpg").await.unwrap());
-        assert!(!incorrect.exists("playlist.m3u8").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn discovery_uses_object_prefixes_not_workspace_directories() {
-        let directory = tempfile::tempdir().unwrap();
-        let room = RecordingStorage::local(directory.path());
-        room.write("cover.jpg", b"room cover").await.unwrap();
-        room.write("first/playlist.m3u8", b"playlist")
-            .await
-            .unwrap();
-        room.write("first/media/segment.ts", b"media")
-            .await
-            .unwrap();
-        room.write("second/entries.log", b"").await.unwrap();
-        // Copy fallback stages can live beside archives, including across
-        // restart. Neither empty nor populated private stages are recordings.
-        room.write(".recording-transfer-stage-empty/archive/entries.log", b"")
-            .await
-            .unwrap();
-        room.write(
-            ".recording-transfer-stage-data/archive/media.ts",
-            b"staged media",
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recording_ids(&room).await.unwrap(),
-            BTreeSet::from(["first".to_string(), "second".to_string()])
-        );
-    }
-
-    #[tokio::test]
-    async fn malformed_logs_or_orphan_media_are_not_confirmed_empty() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = RecordingStorage::local(directory.path());
-        storage.write("entries.log", b"").await.unwrap();
-        assert!(confirmed_empty(&storage).await.unwrap());
-        storage
-            .write("entries.log", b"damaged legacy log")
-            .await
-            .unwrap();
-        assert!(EntryStore::from_storage(&storage).await.unwrap().is_empty());
-        assert!(!confirmed_empty(&storage).await.unwrap());
-        storage.write("entries.log", b"").await.unwrap();
-        storage
-            .write("orphan.ts", b"media without an entry")
-            .await
-            .unwrap();
-        assert!(!confirmed_empty(&storage).await.unwrap());
-    }
 }

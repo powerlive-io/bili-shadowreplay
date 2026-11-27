@@ -69,7 +69,6 @@
   let calendarMenuOpen = $state(false);
   let summaryStatuses: Record<string, RecordSummaryStatus> = $state({});
   let actionError = $state("");
-  let disposed = false;
   let openMenuArchiveKey: string | null = $state(null);
   // The row menu is viewport-fixed so sticky cells and the table's scroll box cannot clip it.
   let menuPlacement: { top: number; right: number; up: boolean } | null = $state(null);
@@ -131,22 +130,21 @@
     }
   });
 
-  async function loadSummaryStatuses() {
-    try {
+  $effect(() => {
+    if (!pageVisible()) return;
+    let active = true;
+    const refresh = createStateRefresh(async () => {
       const statuses = await invoke<RecordSummaryStatus[]>("get_archive_summary_statuses");
-      if (!disposed) summaryStatuses = Object.fromEntries(statuses.map((status) => [archiveKey(status), status]));
-    } catch (error) {
-      console.warn("Failed to load Summary statuses:", error);
-    }
-  }
+      if (active) summaryStatuses = Object.fromEntries(statuses.map((status) => [archiveKey(status), status]));
+    }, 1000, error => console.warn("Failed to load Summary statuses:", error));
+    const stop = watchStateChanges(refresh, ["records-changed"]);
+    return () => { active = false; stop(); };
+  });
 
-  const summaryRefresh = createStateRefresh(loadSummaryStatuses, 1000);
   onMount(() => {
     restoreArchiveViewPreference();
     const savedSize = Number(localStorage.getItem("archive-page-size"));
     if (pageSizeOptions.includes(savedSize)) pageSize = savedSize;
-    const stop = watchStateChanges(summaryRefresh, ["records-changed"]);
-    return () => { disposed = true; stop(); };
   });
 
   function changePageSize() {
