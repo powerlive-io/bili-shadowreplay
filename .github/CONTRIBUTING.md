@@ -34,7 +34,7 @@ kache stats
 kache explain
 ```
 
-临时排查编译问题时，可以禁用 wrapper：Unix 使用 `RUSTC_WRAPPER= yarn tauri dev`。PowerShell 各版本通用的方式是暂时将 `.cargo/config.toml` 中的 `rustc-wrapper = "kache"` 改为 `rustc-wrapper = ""`；若已有 `RUSTC_WRAPPER` 环境变量，先记录其值并移除，避免覆盖文件配置。排查结束后恢复原配置和环境变量。不要在旧版 PowerShell 中用空字符串给环境变量赋值来停用 wrapper：这会删除变量，使 Cargo 继续使用仓库配置。
+排查编译问题时，Unix 可用 `RUSTC_WRAPPER= yarn tauri dev` 临时禁用 wrapper。PowerShell 各版本都可以暂时把 `.cargo/config.toml` 中的 `rustc-wrapper = "kache"` 改为 `rustc-wrapper = ""`。若已设置环境变量 `RUSTC_WRAPPER`，先记录原值并移除它，否则它会覆盖文件配置。排查结束后，恢复配置和环境变量。旧版 PowerShell 会删除被赋空字符串的环境变量，导致 Cargo 继续使用仓库配置，因此不能用这种方式停用 wrapper。
 
 GitHub Actions 的测试、Clippy 和桌面发布任务通过 `setup-kache` 安装相同版本，保留 `rust-cache` 用于 Cargo 构建目录和昂贵的原生依赖。kache 的本地存储按构建类型分组，每组上限 1 GiB；PR 只恢复缓存，main 和版本标签构建保存缓存，统计显示在 Job Summary 中。无需新增 Secrets。Docker 镜像构建和 Dev Container 也已安装相同版本；Docker 继续通过 cargo-chef 和镜像构建缓存复用依赖层。
 
@@ -60,8 +60,7 @@ yarn tauri dev
 
 ### Windows
 
-Windows 下分为两个版本，分别是 `cpu` 和 `cuda` 版本。区别在于 Whisper 是否使用 GPU 加速。
-`cpu` 版本使用 CPU 进行推理，`cuda` 版本使用 GPU 进行推理。
+Windows 提供 `cpu` 和 `cuda` 两个版本。区别在于 Whisper 在哪里推理：`cpu` 版本使用 CPU，`cuda` 版本使用 GPU 加速。
 
 基础编译工具：Rust 1.99.0（`x86_64-pc-windows-msvc`，由仓库工具链配置选择）、Node/Yarn、Visual Studio 2022 或 Build Tools 的“使用 C++ 的桌面开发”（包含 MSVC x64、Windows SDK、CMake 工具），以及 64 位 LLVM（或 Visual Studio 的 C++ Clang 工具）。标准安装位置会自动发现，无需手动修改 `PATH` 或使用 Developer PowerShell。
 
@@ -110,7 +109,7 @@ yarn docs:dev
 
 文档源文件保留在 `docs/getting-started/`、`docs/usage/`、`docs/development/`；新增页面需要填写 `title` frontmatter，并在对应的 `meta.json` 中安排导航顺序。Markdown 中可以继续使用相对 `.md` 链接、Mermaid 代码块和 HTML 视频。测试指南位于 `docs/development/testing/`；旧 `/TESTING` 地址由静态兼容页引导至新入口。
 
-项目图表在 `docs/diagrams/` 中维护。正文单独一段写 `[说明](https://bsr.powerlive.io/diagrams/<id>.html)`：站点在构建时嵌入 SVG，其他 Markdown 阅读器保留链接。独立 HTML 与正文使用同一份图和样式，构建后可直接离线打开 `docs/out/diagrams/<id>.html`，不需要生成或提交截图。
+项目图表在 `docs/diagrams/` 中维护。在正文中单独写一段 `[说明](https://bsr.powerlive.io/diagrams/<id>.html)`，文档站构建时会把它替换成内嵌 SVG，其他 Markdown 阅读器则保留链接。独立 HTML 与正文共用同一份图和样式；构建后可直接离线打开 `docs/out/diagrams/<id>.html`，无需生成或提交截图。
 
 首页原有的 Vue 交互演示位于 `docs/home/`，在构建时预渲染，浏览器中只挂载到独立的首页容器。启动开发服务时会先生成首页资源；修改首页组件后，执行 `yarn --cwd docs home:build` 并刷新页面。
 

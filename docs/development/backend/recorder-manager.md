@@ -5,7 +5,7 @@ title: "录制管理器 (Recorder Manager)"
 
 ## 概述
 
-`recorder_manager.rs` 是录制系统的核心协调器，负责管理所有录制任务的生命周期。位于 `src-tauri/src/recorder_manager.rs`。
+录制管理器位于 `src-tauri/src/recorder_manager.rs`。`recorder_manager.rs` 负责协调各房间的录制器，管理录制任务的创建、运行和结束。
 
 ## 主要职责
 
@@ -92,7 +92,9 @@ enum RecordingStatus {
 
 ## 切片任务取消
 
-实时回放页面的 `clip_range` 命令会先在数据库创建任务记录，再交给 `TaskManager` 执行实际的 `RecorderManager::clip_range` 流程。这样切片任务不会绑定在 Web 页面的 HTTP 请求生命周期上，页面关闭后仍可继续在后台运行。用户显式取消任务时，后端通过 `TaskManager::cancel_task` 中止运行中的任务；只有任务实际取消，或数据库记录仍处于 `pending` / `processing` 时，才会把数据库状态更新为 `cancelled`，避免覆盖已经完成的任务。
+实时回放页调用 `clip_range` 时，后端先在数据库中创建任务记录，再由 `TaskManager` 调度 `RecorderManager::clip_range`。任务不依赖发起请求的 Web 页面，即使关闭页面，后台仍可继续处理。
+
+只有用户明确取消时，后端才通过 `TaskManager::cancel_task` 中止任务。任务实际取消，或数据库记录仍处于 `pending` / `processing` 时，后端才写入 `cancelled`，避免覆盖已完成的任务。
 
 切片、转码、合并和弹幕压制通过原生媒体任务执行。异步 future 被取消时会触发协作取消和 AVIO 中断；阻塞工作线程持有输入、编码器、输出和临时素材，关闭原生上下文后才释放资源。文件尾和关闭成功后才发布临时输出，发布后再发送完成进度。BGRA 输入通过有界队列传入，取消同时唤醒生产者和消费者。
 

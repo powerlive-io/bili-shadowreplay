@@ -363,7 +363,7 @@ impl Platform {
 
 - 使用 HTTP API 获取流信息
 - 支持多种清晰度选择
-- 弹幕通过 WebSocket 连接
+- 通过 WebSocket 连接接收弹幕
 - 需要处理 Cookie 认证（投稿功能）
 
 ### Douyin
@@ -394,7 +394,7 @@ impl Platform {
 
 - 通过 Twitch Web GraphQL 获取公开播放令牌，再从 usher HLS 端点选择最高码率变体
 - 不需要账号 Cookie；直播元数据和封面来自公开 GraphQL 查询
-- 弹幕通过匿名 `irc-ws.chat.twitch.tv` WebSocket 接收 IRC `PRIVMSG`，并在断线后自动重连
+- 通过匿名 `irc-ws.chat.twitch.tv` WebSocket 连接接收 IRC `PRIVMSG` 弹幕，断线后自动重连
 
 ## 测试
 
@@ -449,5 +449,5 @@ mod tests {
 2. **重试机制**: 对临时性错误实现重试
 3. **超时控制**: 为所有网络请求设置超时
 4. **资源清理**: 确保连接和资源正确释放
-5. **文档完善**: 为平台特定的实现添加注释
+5. **文档完善**：用注释说明平台特有的处理逻辑
 6. **遵循规范**: 遵守平台的使用条款和 API 限制

@@ -51,9 +51,9 @@ proot-distro login bili-shadowreplay \
   -- /bin/sh -lc 'cd /app && exec ./bili-shadowreplay'
 ```
 
-服务启动后，在手机浏览器中打开 <http://127.0.0.1:3000>。首次打开时，选择「使用当前站点地址」，再点击「连接并进入」。这里不需要 Docker
-的 `-p` 端口映射。按 `Ctrl+B`、再按 `D` 可以退出 `tmux` 而不停止服务；
-之后使用 `tmux attach -t bsr` 返回。
+服务启动后，在手机浏览器中打开 <http://127.0.0.1:3000>，无需配置 Docker 的 `-p` 端口映射。首次打开时，选择「使用当前站点地址」，再点击「连接并进入」。
+
+要离开终端而不停止服务，先按 `Ctrl+B`，再按 `D` 分离 `tmux` 会话。之后可以用 `tmux attach -t bsr` 重新连接。
 
 配置文件位于容器内的 `/app/config.toml`，数据库、缓存和输出分别持久化到
 `$HOME/bsr/data`、`$HOME/bsr/cache` 和 `$HOME/bsr/output`。需要长期保留或

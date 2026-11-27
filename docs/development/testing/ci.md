@@ -5,7 +5,7 @@ description: "GitHub Actions 的测试职责、跳过边界和文档发布前检
 
 ## 自动化检查范围
 
-以 `.github/workflows/` 中的工作流为准，不以历史测试数量或本地某一次运行作为 CI 覆盖范围。
+要判断 CI 实际检查了什么，请看 `.github/workflows/` 中的工作流。历史测试数量和某次本地测试结果都不能代表当前覆盖范围。
 
 ### Tests 工作流
 
@@ -28,7 +28,7 @@ cargo test --package bili-shadowreplay --no-default-features --features headless
 cargo test --package bili-shadowreplay --no-default-features --features headless storage_migration_tests --locked
 ```
 
-工作区库测试不包含应用二进制目标中的用例，因此目录迁移和存储迁移会单独运行。
+工作区库测试不包含应用二进制目标中的用例，因此 CI 会单独运行目录迁移和存储迁移测试。
 
 ### Lint 与提交前检查
 
@@ -64,4 +64,4 @@ yarn --cwd docs test:export
 yarn docs:preview
 ```
 
-`.github/workflows/pages.yml` 在文档或自身工作流变动的 PR 上构建并验证静态导出；合入 `main` 后部署。新增文档应填写中文标题和说明，并在对应目录的 `meta.json` 中安排导航顺序。
+当 PR 修改文档或工作流本身时，`.github/workflows/pages.yml` 会构建并验证静态导出；合入 `main` 后才部署。新增文档应填写中文标题和说明，并在对应目录的 `meta.json` 中安排导航顺序。

@@ -3,9 +3,9 @@ title: "桌面端安装"
 ---
 
 
-桌面端目前提供了 Windows、Linux 和 MacOS 三个平台的安装包。
+桌面端提供 Windows、Linux 和 macOS 安装包。
 
-由于程序会对账号等敏感信息进行管理，请从信任的来源进行下载；所有版本均可在 [GitHub Releases](https://github.com/powerlive-io/bili-shadowreplay/releases) 页面下载安装。
+程序会管理账号等敏感信息，请从可信来源下载。各版本的安装包均可在 [GitHub Releases](https://github.com/powerlive-io/bili-shadowreplay/releases) 找到。
 
 Windows、macOS 和 Linux 桌面安装包已携带媒体处理运行库，无需单独安装 `ffmpeg` 或 `ffprobe`。Linux 仍需要兼容的系统桌面运行库，详情见 [FFmpeg 配置](../config/ffmpeg.md)。
 
@@ -30,4 +30,4 @@ Linux 版本目前仅支持使用 CPU 推理，且测试较少，可能存在一
 
 macOS 桌面安装包最低支持 **macOS 15.8.1**，Intel 和 Apple Silicon 版本均适用。
 
-MacOS 版本内置 Metal GPU 加速；安装后首次运行，会提示无法打开从网络下载的软件，请在设置-隐私与安全性下，选择仍然打开以允许程序运行。
+macOS 版本内置 Metal GPU 加速。首次运行时，如果系统提示无法打开从网络下载的软件，请先确认安装包来源可信，再到系统设置的「隐私与安全性」中选择「仍然打开」。

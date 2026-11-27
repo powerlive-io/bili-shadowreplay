@@ -5,8 +5,8 @@ title: "LLM 配置"
 
 ![LLM](/images/model_config.png)
 
-助手页面的 AI Agent 助手功能需要配置大模型，目前仅支持配置 OpenAI 协议兼容的大模型服务。
+使用 AI 助手前，请在「设置 → AI 模型」中选择提供商、填写服务地址和模型名。可以连接兼容 OpenAI 协议的服务，也可以使用本地 Ollama 模型。
 
-本软件并不提供大模型服务，请自行选择服务提供商。要注意，使用 AI Agent 助手需要消耗比普通对话更多的 Token，请确保有足够的 Token 余额。
+BSR 不提供大模型服务。使用按量计费的服务时，请留意 Token 余额：助手调用工具时可能需要多轮对话，比普通对话消耗更多 Token。
 
-此外，AI Agent 的功能需要大模型支持 Function Calling 功能，否则无法正常调用工具。
+要让助手调用工具，所选模型必须支持 Function Calling（函数调用）。

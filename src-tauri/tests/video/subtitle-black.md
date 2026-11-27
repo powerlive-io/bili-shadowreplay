@@ -1,7 +1,8 @@
-`subtitle-black.mp4` contains generated black video (160×90, 10 fps, 1.1 s,
-H.264 with B-frames) and a generated 440 Hz mono AAC tone. It contains no
-third-party media. It lets native libass rendering tests verify color, style
-overrides, cue boundaries and unchanged audio without a CLI installed.
+`subtitle-black.mp4` pairs 1.1 s of generated black video (160×90, 10 fps,
+H.264 with B-frames) with a generated 440 Hz mono AAC tone. It contains no
+third-party media. Native libass rendering tests use it to check color, style
+overrides, and cue boundaries, and to verify that the audio stays unchanged.
+Running those tests does not require a CLI.
 
 Reproduce with:
 

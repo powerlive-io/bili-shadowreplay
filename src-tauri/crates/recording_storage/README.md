@@ -17,12 +17,13 @@ its storage settings, persists them separately using its credential cipher, and
 never returns them through the configuration API. `S3Credentials` redacts Debug
 output. Clients hold a credential snapshot; recreate them after rotation.
 
-Custom endpoints are service origins. Path-style uses `endpoint/bucket/key`;
-virtual-hosted access derives `bucket.endpoint/key`. An already bucket-qualified
-DNS endpoint is accepted without adding the bucket twice. IP endpoints require
-path-style; unqualified bucket-specific CNAMEs are not supported. Empty endpoints
-retain the SDK's AWS defaults. Media and catalog clients share this conversion
-without rewriting persisted endpoint identities.
+Custom endpoints are service origins. Path-style requests use
+`endpoint/bucket/key`; virtual-hosted requests use `bucket.endpoint/key`. If
+the DNS endpoint already includes the bucket, the client does not add it
+again. IP endpoints require path-style access. Bucket-specific CNAMEs without
+the bucket prefix are not supported. Leave the endpoint empty to use the SDK's
+AWS defaults. Media and catalog clients apply the same conversion without
+rewriting the stored endpoint identity.
 
 Bounded GETs check both response metadata and streamed chunks. Range reads use
 HEAD plus a conditional ranged GET to retain EOF semantics without downloading
@@ -80,10 +81,11 @@ logs, pagination, deletion, catalog reopen and bidirectional transfer.
 
 ## Durable logs
 
-Use `open_log`, `AppendLog::append`, `read_log` and `log_exists`, not object `read`
-or `exists`, for event/ad logs. `read_log` includes both an old plain base object
-and any committed chunks. Missing logs return `NotFound`; malformed metadata,
-missing committed chunks and backend failures propagate as errors.
+For event and ad logs, use `open_log`, `AppendLog::append`, `read_log`, and
+`log_exists` rather than the object-level `read` or `exists`. `read_log`
+includes the legacy plain base object, if present, and all committed chunks.
+A missing log returns `NotFound`. Malformed metadata, a missing committed
+chunk, or a backend failure is an error, not an empty log.
 
 The default backend implementation needs only object operations:
 
@@ -98,11 +100,12 @@ opening an existing log reads the count. Reading costs one legacy-base GET, one
 metadata GET and one GET per committed chunk; the returned `Vec` necessarily
 holds the whole log.
 
-Chunks live under the reserved `.recording-logs` directory **alongside** the log,
-with a collision-free encoded filename. Copy this directory when moving archives.
-Uncommitted chunks after failed writes are ignored and reused on a retry; recording
-deletion also removes orphan chunks. An acknowledgement loss may mean the append
-committed; automatic exactly-once retries are not promised.
+Chunks use collision-free encoded filenames in the reserved `.recording-logs`
+directory **alongside** the log. Include that directory when moving an archive.
+Readers ignore uncommitted chunks left by a failed write; a retry can reuse
+them, and deleting the recording removes orphan chunks. A lost acknowledgement
+does not mean the append failed: it may already have committed. Automatic
+retries do not guarantee exactly-once delivery.
 
 There is one writer per recording/log. Clones of the same append handle serialize
 writes. A cancelled append finishes in the background while retaining that handle's

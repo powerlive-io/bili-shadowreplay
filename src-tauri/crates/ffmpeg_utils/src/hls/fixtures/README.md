@@ -1,8 +1,8 @@
 # Native live recording fixture
 
-`live.flv` is a six-second generated test pattern with 64×48 H.264 video,
-B-frames, one-second keyframe intervals, and 48 kHz mono AAC sine audio. No
-third-party recording is included. Generated with FFmpeg 9.0.2:
+`live.flv` contains six seconds of generated media: a 64×48 H.264 test pattern
+with B-frames and one-second keyframe intervals, and a 48 kHz mono AAC sine
+tone. It contains no third-party recording. To reproduce it with FFmpeg 9.0.2:
 
 ```sh
 ffmpeg -f lavfi -i testsrc2=size=64x48:rate=25:duration=6 \

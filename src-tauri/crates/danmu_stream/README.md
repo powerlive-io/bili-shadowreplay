@@ -1,8 +1,8 @@
 ## Event format
 
-The stream providers expose every decoded websocket event as a
-`DanmuMessageType::Event`. Recorders write these events as one JSON object per
-line to `events.jsonl`:
+Stream providers expose each decoded WebSocket event as a
+`DanmuMessageType::Event`. Recorders write the events to `events.jsonl`, one
+JSON object per line:
 
 ```json
 {
@@ -26,6 +26,6 @@ line to `events.jsonl`:
 
 `ts` is Unix time in milliseconds and `type` is the normalized event
 category. Current categories are `danmu`, `gift`, `super_chat`, `enter`,
-`like`, `online`, `room_update`, and `unknown`. `data` has the common fields
-for that category; `raw` retains the original JSON provider payload so that
-new provider fields remain available without changing the storage format.
+`like`, `online`, `room_update`, and `unknown`. `data` holds the fields shared
+by events in that category. `raw` preserves the provider's original JSON, so
+new provider fields remain available without a change to the storage format.

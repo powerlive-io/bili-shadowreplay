@@ -3,7 +3,7 @@ title: "桌面应用内更新"
 ---
 
 
-关于页在启动时检查 GitHub 最新正式 Release 的 `latest.json`。有适配当前系统和架构的新版时，显示「更新至」按钮。点击后下载、验证签名、安装并自动重启；下载或安装失败可重试，重启失败可单独重试重启。更新会中断正在运行的录制和任务，请先结束这些操作。
+关于页在启动时读取 GitHub 最新正式 Release 的 `latest.json`。如果有适配当前系统和架构的新版本，页面会显示「更新至」按钮。更新会中断录制和任务，请先结束这些操作再点击按钮。应用会依次下载更新、验证签名、安装并自动重启。下载或安装失败可以重试；如果只有重启失败，单独重试重启即可。
 
 Windows CPU 与 CUDA 使用不同的更新目标，不会相互覆盖。Linux 应用内更新适用于 AppImage；deb/rpm 和 Docker/Web 部署仍通过原有方式升级。
 
@@ -11,11 +11,11 @@ Windows CPU 与 CUDA 使用不同的更新目标，不会相互覆盖。Linux �
 
 已生成的私钥保存在本机项目目录的 `.updater/bili-shadowreplay.key`，该目录被 Git 忽略，权限仅限当前用户。对应公钥已写入 `src-tauri/tauri.conf.json`。
 
-1. 将私钥文件的完整内容存入 GitHub 仓库的 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`。不要将私钥提交到仓库、日志或 Release。
+1. 将私钥文件的完整内容存入 GitHub 仓库的 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`。不要将私钥提交到仓库、写入日志或发布到 Release。
 2. 当前私钥未设密码，`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可留空。若替换成有密码的密钥，将密码保存为同名 Secret。
 3. 备份私钥。以后所有版本都必须用同一把私钥签名，否则已安装的客户端无法验证更新。
 
-其他维护者如需重新初始化（仅在尚未发布此公钥对应的客户端时），运行 `yarn tauri signer generate -w .updater/bili-shadowreplay.key`，将生成的 `.pub` 文件完整内容写入配置的 `plugins.updater.pubkey`，并同步更新 Secret。
+只有在尚未发布使用该公钥的客户端时，维护者才能重新初始化密钥。运行 `yarn tauri signer generate -w .updater/bili-shadowreplay.key`，将生成的 `.pub` 文件的完整内容写入 `plugins.updater.pubkey`，并同步更新 Secret。
 
 本地打包也需要提供签名环境变量：
 

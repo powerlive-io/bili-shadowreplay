@@ -9,11 +9,11 @@ BiliBili ShadowReplay 是一个基于 Tauri 2 的混合桌面应用，采用前�
 
 ### 前端技术栈
 
-- **框架**: Svelte 3 + TypeScript
+- **框架**: Svelte 5 + TypeScript
 - **构建工具**: Vite
 - **UI 框架**: Tailwind CSS + Flowbite
 - **AI 交互**: 管理对话历史，展示工具调用，并在用户确认后执行需要授权的操作
-- **音频可视化**: 时间轴显示由后端从素材音轨计算的波形峰值
+- **音频可视化**: 后端从素材音轨计算波形峰值，前端在时间轴上显示波形
 - **实时通信**: Socket.io
 
 ### 后端技术栈
@@ -32,7 +32,7 @@ BiliBili ShadowReplay 是一个基于 Tauri 2 的混合桌面应用，采用前�
 
 [系统架构：桌面与 Web 如何调用 Rust 后端](https://bsr.powerlive.io/diagrams/system-architecture.html)
 
-`invoker.ts` 为桌面端选择 Tauri IPC，为 Web 端选择 `/api/<command>`。图中合并了平台实现；哪些来源能录制、哪些还能收弹幕，见下方[平台支持](#平台支持)。后端主动推送状态的路径见[应用事件系统](../frontend/invoker.md#应用事件系统)。
+`invoker.ts` 在桌面端通过 Tauri IPC 调用后端，在 Web 端则请求 `/api/<command>`。图中将平台实现合在一起展示；各平台能否录制、能否收弹幕，见[平台支持](#平台支持)。后端向前端推送状态走的是另一条路径，见[应用事件系统](../frontend/invoker.md#应用事件系统)。
 
 ## 目录结构
 
@@ -128,7 +128,7 @@ src-tauri/
 
 [生成时序：录播选区、素材记录与可选切片工程](https://bsr.powerlive.io/diagrams/material-sequence.html)
 
-预览页使用 `generate_materials`：默认一个选区对应一个素材，启用 `merge` 后多个选区合为一个。勾选创建切片才会建立引用这些素材的工程；此时不导出成片。详见[素材、切片工程与投稿](./material-project.md)。
+预览页调用 `generate_materials` 生成素材。默认每个选区生成一个素材；启用 `merge` 后，多个选区合为一个素材。只有勾选创建切片才会建立引用这些素材的工程，这一步不导出视频。详见[素材、切片工程与投稿](./material-project.md)。
 
 ## 平台支持
 
