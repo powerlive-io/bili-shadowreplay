@@ -198,21 +198,7 @@ Socket.IO 的底层发送队列也是有界的。预览发送遇到临时队列�
 
 Webhook 后台请求使用发送开始时的配置和 HTTP 客户端快照，网络等待与重试间隔不持有配置读锁。慢响应不会阻塞配置更新，也不会通过等待配置写锁间接拖住录制生命周期事件处理；更新后的配置用于后续发送。
 
-```mermaid
-flowchart LR
-  Producer[录制器] -->|预览回调| Rooms[按平台与房间隔离的 stream]
-  Producer -->|开始 / 结束：有界等待| Queue[录制管理队列]
-  Producer -->|统计增量合并| Deltas[按归档累加的待处理统计]
-  Deltas --> Manager[RecorderManager]
-  Queue --> Manager
-  Manager --> DB[数据库]
-  DB -->|写入成功后| Control[control]
-  Progress[任务进度] --> Control
-  Rooms -->|只转发订阅房间| Client[Socket / 指定窗口]
-  Control --> Client
-  Client -->|数据事件| Snapshot[合并后查询快照]
-  Client -->|弹幕事件| Preview[渲染预览]
-```
+[事件分发：全局控制通知与按房间隔离的弹幕预览](https://bsr.powerlive.io/diagrams/event-delivery.html)
 
 ### 后端错误返回
 

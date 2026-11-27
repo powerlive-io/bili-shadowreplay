@@ -67,12 +67,7 @@ yarn tauri build
 
 macOS 与 Windows 共享 `MediaPlan`、Skia Vulkan 场景绘制、专用 Vulkan compute 合成和 NV12 转换，以及原生解码、时间轴、音频、分段缓存、取消和封装逻辑。`RenderPipeline` 显式选择渲染后端与编码器；编码器名称不再决定渲染方式，同样使用 VideoToolbox 的 CPU/GPU 导出具有不同缓存身份。
 
-```text
-MediaPlan 解码/滤镜 → NV12 底图上传 → Skia Vulkan + Vulkan compute 合成
-                                      ├─ Windows: AVVkFrame → Vulkan Video
-                                      └─ macOS: MoltenVK R8/RG8 → Metal blit
-                                                → IOSurface/CVPixelBuffer → VideoToolbox
-```
+[GPU 导出：共享的合成路径与两个平台的帧交接](https://bsr.powerlive.io/diagrams/gpu-export.html)
 
 macOS 使用 `VK_EXT_metal_objects` 导出两个独立 GPU 纹理，复制到 FFmpeg VideoToolbox 帧池提供的 IOSurface。它不使用 Skia Metal 渲染后端，也不要求 Vulkan Video。桥接默认采用最多三帧的异步交接队列：检查 Vulkan 写入完成后提交 Metal GPU blit，复制完成的帧按顺序交给原 `MediaPlan` 编码器；队列满、收尾或取消时才阻塞推进。没有 `readPixels`、`hwdownload` 或 CVPixelBuffer CPU 映射，但每帧仍有一次 GPU 内部复制，并非严格的零拷贝。底图目前仍由 CPU 多线程解码并上传一次。
 

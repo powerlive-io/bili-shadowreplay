@@ -31,6 +31,8 @@ title: "存储自带的 JSON 录播目录"
 
 ## 挂载与查询
 
+[目录挂载：缓存命中、强制重扫与失败保留](https://bsr.powerlive.io/diagrams/catalog-cache-or-scan.html)
+
 - 本机 SQLite 按存储 UUID 缓存完整的录播 JSON，包括删除标记和转移凭据。首次连接（含升级后尚无缓存）扫描存储并建立缓存；已确认的空目录也是有效缓存。
 - 正常启动仍检查存储身份、访问权限和导入状态，但不再列举录播目录或逐条下载 JSON。录制、编辑、删除和转移在发布存储元数据时增量更新本机缓存；如果写入中断、结果不确定，下次连接重新扫描恢复。
 - 排查启动慢时，在 `bsr.log` 搜索 `Loaded recording catalog`：`source=sqlite_cache` 表示从本机恢复，`source=storage_scan` 表示重新扫描目录。桌面端每个存储独立校验身份，命中缓存后即展示只读预览，无须等待其他存储连接完成。

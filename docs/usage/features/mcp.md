@@ -73,7 +73,13 @@ BSR 必须保持运行。客户端连接后会自动发现当前可用工具，�
 
 ### 后台任务
 
-`generate_materials`、`clip_range`、`generate_video_subtitle` 和 `generate_archive_subtitle` 在后台执行，调用后立即返回 `task_id`。用 `get_task` 查询，直到 `status` 为 `success`、`failed` 或 `cancelled`；成功后 `metadata.result` 中是产出的 ID，例如素材的 `video_id`，或 `material_ids` 与 `project_id`。字幕生成完成后用 `get_video_subtitle` 或 `get_archive_subtitle` 读取。开始执行前就能发现的错误（例如素材或录播不存在）会直接作为调用错误返回。在任务队列中运行的任务可以用 `cancel_task` 取消；字幕识别不在任务队列中，无法取消。
+[MCP 后台任务：从任务编号到素材 ID，再交给用户发布](https://bsr.powerlive.io/diagrams/mcp-task-handoff.html)
+
+`generate_materials`、`clip_range`、`generate_video_subtitle` 和 `generate_archive_subtitle` 会先短暂等待结果。快速完成时，调用直接返回 `status: "success"` 和 `result`；能立即发现的错误（如素材不存在）直接作为调用错误返回。
+
+如果工作仍在后台执行，用返回的 `task_id` 作为 `get_task` 的 `id` 参数。`task.status` 为 `pending` 或 `processing` 时继续查询，`failed` 或 `cancelled` 时停止，不创建草稿。素材任务成功后从 `task.metadata.result` 取 `video_id`（`clip_range`）或 `material_ids`、可选的 `project_id`（`generate_materials`）；字幕任务成功后用 `get_video_subtitle` 或 `get_archive_subtitle` 读取字幕。
+
+队列中的任务可用 `cancel_task` 取消；字幕识别不在任务队列中，无法取消。
 
 `encode_video_subtitle` 同样立即返回，结果中的 `task_id` 可用于 `get_task`。返回排队任务不代表视频已压制完成。
 

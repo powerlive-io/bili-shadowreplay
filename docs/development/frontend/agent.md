@@ -11,14 +11,7 @@ Agent 主体位于 `src-tauri/src/agent/`。前端的 `src/lib/agent/agent.ts` �
 
 ## 架构
 
-```mermaid
-graph LR
-    UI[AI 页面] --> Command[agent_chat]
-    Command --> Agent[Rust Rig Agent]
-    Agent --> LLM[OpenAI 兼容 API / Ollama]
-    Agent --> Tool[BsrTool]
-    Tool --> Backend[Database / RecorderManager]
-```
+[AI 工具调用：Rust 只读查询与前端确认分支](https://bsr.powerlive.io/diagrams/agent-tools.html)
 
 每次请求会携带前端当前保存的完整对话记录。用户、助手和工具消息会转换为 Rig 的真实角色消息，而不是拼接成单个文本提示。Rust Agent 在单次 command 内完成模型调用和只读工具循环，并将最终文本、工具调用轨迹及错误状态一起返回。
 

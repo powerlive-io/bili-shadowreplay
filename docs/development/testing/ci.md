@@ -56,7 +56,7 @@ yarn --cwd docs test:export
 
 - `docs:build`：构建首页资源和 Next.js 静态站点，产物位于 `docs/out/`。
 - `docs:check`：生成文档类型并运行 TypeScript 检查。
-- `test:export`：检查导出页面、站内链接与锚点、资源、旧测试入口、静态搜索，以及首页、视频和 Mermaid 内容。
+- `test:export`：检查导出页面、站内链接与锚点、资源、旧测试入口、静态搜索，以及首页、视频、正文内嵌图与离线图表。
 
 需要人工确认导航和排版时运行：
 

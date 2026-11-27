@@ -48,24 +48,13 @@ docker compose -p shadowreplay-webdav-manual -f docker_compose.webdav.yaml up -d
 
 ## 依赖与职责
 
-```mermaid
-flowchart TD
-    DB["数据库：backend 配置与每场录播的绑定"] --> A0["ArchiveStorage：解析归档绑定"]
-    A0 --> S["RecordingStore"]
-    P["平台录制器"] --> S
-    C["RecorderManager：回放 / 剪辑 / 字幕 / 删除"] --> A0
-    S --> R["RecordingStorage：单场录制的资产命名空间"]
-    R --> B["StorageBackend：对象 / 日志 / 列举 / 删除"]
-    R --> W["LocalAssets：临时处理副本"]
-    R --> L["AppendLog：后端日志"]
-    L --> B
-    B --> F["LocalBackend"]
-    B --> S3["S3Backend：AWS S3 / RustFS / MinIO"]
-    B --> DAV["WebDavBackend：WebDAV"]
-    N["ffmpeg-next：原生 HLS muxer"] --> I["自定义 AVIO / HlsObjectStore"]
-    I --> A["NativeHlsStorage：同步到异步适配"]
-    A --> R
-```
+先确定归属，再访问资产。新录播必须先持久化绑定；读取或续录使用已有绑定，而不是重新查询房间的当前偏好。
+
+[存储绑定：新录制、续录和历史归档如何定位后端](https://bsr.powerlive.io/diagrams/storage-binding.html)
+
+原生 HLS muxer 通过自定义 AVIO / `HlsObjectStore` 和 `NativeHlsStorage` 写入这个命名空间。日志的追加语义由中间层实现；需要本地路径时才物化临时文件。
+
+[存储读写：对象、追加日志与临时处理副本](https://bsr.powerlive.io/diagrams/storage-io.html)
 
 - `RecordingStore`：录制入口注入的服务，负责创建房间或录制命名空间。
 - `RecordingStorage`：相对资产 key 的读写、状态查询和媒体发布。
@@ -190,6 +179,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
 未完成复制的重试仍按数据库中的完整大小估算，不为容量预检查读取已有副本。因此，已有副本可能使实际剩余需求低于估算：只要新增录播的估算空间足够，界面允许尝试恢复，并在预计空间不足时明确提示；执行到该场时才验证和复用已有副本，不要求再次预留完整清单大小的空间。待清理或收尾记录不计入新增复制空间，也不提前计入清理可释放的空间。
 
 转移作为后台任务运行，按录播依次执行，不修改应用默认值或房间的后续录制偏好。两种方式都先持久化转移状态，并与该录播的读写和删除操作互斥。
+
+[单场转移时序：先校验目标，再切换本机绑定，最后清理来源](https://bsr.powerlive.io/diagrams/storage-transfer-commit.html)
+
+图中是**复制**，不是同文件系统的快速移动。复制时，提交绑定前保留 A 的源文件；快速移动时，若目录已改名而绑定尚未提交，文件在 B，绑定仍在 A。两种情况都应对原来的 A → B 重试，让任务按日志恢复，不要手动删除看似重复的文件。
 
 列表计算录播时间、封面和预览请求会短暂持有读句柄，这些读取不阻止空间预估和只读规划。真正处理每场录播前，转移任务排队等待已有读取结束（最多 30 秒），避免列表刷新不断抢占而导致手动重试。超时会明确报告正在等待的录播，不开始该场的移动、复制或新转移日志写入；此前已完成的录播不会回滚。正在录制、字幕发布或删除等写操作仍是阻塞项。
 

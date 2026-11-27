@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { parse } from 'parse5';
+import { parse, serializeOuter } from 'parse5';
 import { staticClient } from 'fumadocs-core/search/client/orama-static';
 
 const root = path.resolve('out');
@@ -69,7 +69,57 @@ assert.equal(readFileSync(path.join(root, 'CNAME'), 'utf8').trim(), 'bsr.powerli
 assert(existsSync(path.join(root, '.nojekyll')));
 assert.match(readFileSync(path.join(root, 'index.html'), 'utf8'), /切片编辑/, 'Homepage is prerendered');
 assert.match(readFileSync(path.join(root, 'usage/features/room.html'), 'utf8'), /<video[^>]+src="\/videos\/deeplinking.mp4"/, 'Inline videos survive Markdown compilation');
-assert.match(readFileSync(path.join(root, 'usage/features/workflow.html'), 'utf8'), /图表加载中/, 'Mermaid blocks reach the renderer');
+
+// The article and its offline download must show the same accessible SVG,
+// without waiting for hydration. Every exported figure belongs to an article.
+const standalone = files.filter(file => file.startsWith(`diagrams${path.sep}`));
+const embedded = new Set();
+const attr = (node, name) => node.attrs?.find(a => a.name === name)?.value;
+function elements(tree, tag) {
+  const matches = [];
+  walk(tree, node => { if (node.tagName === tag) matches.push(node); });
+  return matches;
+}
+for (const file of content) {
+  const page = pages.get(path.join(root, file.replace(/\.md$/, '.html')));
+  const ids = new Set();
+  for (const figure of elements(page.tree, 'figure')) {
+    const id = attr(figure, 'data-bsr-diagram');
+    if (!id) continue;
+    assert(!ids.has(id), `${file}: duplicate figure IDs for ${id}`);
+    ids.add(id);
+    const target = path.join('diagrams', `${id}.html`);
+    const offline = pages.get(path.join(root, target));
+    assert(offline, `Missing offline diagram: ${target}`);
+    assert(!elements(figure, 'a').some(link => attr(link, 'href') === `/diagrams/${id}.html`),
+      `${file}: embedded ${id} should not link to its standalone copy`);
+    const [svg] = elements(figure, 'svg');
+    assert(svg && attr(svg, 'role') === 'img', `${file}: ${id} must contain a static image`);
+    assert.equal(attr(svg, 'aria-labelledby'), `${id}-title ${id}-desc`);
+    for (const tag of ['title', 'desc']) {
+      const [child] = elements(svg, tag);
+      assert(child && attr(child, 'id') === `${id}-${tag}` && child.childNodes[0]?.value?.trim(), `${id}: missing accessible ${tag}`);
+    }
+    const [copy] = elements(offline.tree, 'svg');
+    assert(copy && serializeOuter(copy) === serializeOuter(svg), `${id}: standalone and article figures differ`);
+    // Keep the human-readable title/summary in normal document flow: unlike
+    // SVG text, these wrap at the column width instead of shrinking with it.
+    for (const tree of [figure, offline.tree]) {
+      const [caption] = elements(tree, 'figcaption');
+      assert(caption, `${id}: missing figure caption`);
+      for (const [tag, cls] of [['title', 'fig-title'], ['desc', 'fig-summary']]) {
+        const expected = elements(svg, tag)[0].childNodes[0].value;
+        const entry = caption.childNodes.find(node => attr(node, 'class') === cls);
+        assert.equal(entry?.childNodes[0]?.value, expected, `${id}: caption differs from accessible ${tag}`);
+      }
+    }
+    assert.equal(elements(offline.tree, 'script').length, 0, `${id}: standalone diagram must not need a runtime`);
+    embedded.add(target);
+  }
+}
+assert(embedded.has(path.join('diagrams', 'publishing-workflow.html')), 'Workflow includes its static figure');
+assert.deepEqual(embedded, new Set(standalone), 'Unreferenced or missing standalone diagrams');
+
 const index = readFileSync(path.join(root, 'api/search'), 'utf8');
 assert(!index.includes('/TESTING'), 'Legacy testing content is absent from search');
 const client = staticClient({ from: `data:application/json;base64,${Buffer.from(index).toString('base64')}` });
@@ -77,4 +127,4 @@ for (const [query, expected] of [['字幕', '/usage/features/subtitle'], ['Docke
   const results = await client.search(query);
   assert(results.some((result) => result.url?.startsWith(expected)), `Search failed: ${query}`);
 }
-console.log(`Verified ${content.length} documentation pages, legacy testing redirect, testing navigation, ${links} internal links/assets (${fragments} fragments), homepage, videos, Mermaid and Chinese/English static search.`);
+console.log(`Verified ${content.length} documentation pages, ${embedded.size} inline/offline figures, legacy testing redirect, testing navigation, ${links} internal links/assets (${fragments} fragments), homepage, videos and Chinese/English static search.`);

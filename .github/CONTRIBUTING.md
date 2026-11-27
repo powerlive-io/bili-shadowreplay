@@ -110,6 +110,8 @@ yarn docs:dev
 
 文档源文件保留在 `docs/getting-started/`、`docs/usage/`、`docs/development/`；新增页面需要填写 `title` frontmatter，并在对应的 `meta.json` 中安排导航顺序。Markdown 中可以继续使用相对 `.md` 链接、Mermaid 代码块和 HTML 视频。测试指南位于 `docs/development/testing/`；旧 `/TESTING` 地址由静态兼容页引导至新入口。
 
+项目图表在 `docs/diagrams/` 中维护。正文单独一段写 `[说明](https://bsr.powerlive.io/diagrams/<id>.html)`：站点在构建时嵌入 SVG，其他 Markdown 阅读器保留链接。独立 HTML 与正文使用同一份图和样式，构建后可直接离线打开 `docs/out/diagrams/<id>.html`，不需要生成或提交截图。
+
 首页原有的 Vue 交互演示位于 `docs/home/`，在构建时预渲染，浏览器中只挂载到独立的首页容器。启动开发服务时会先生成首页资源；修改首页组件后，执行 `yarn --cwd docs home:build` 并刷新页面。
 
 发布前验证：

@@ -17,20 +17,11 @@ title: "录制管理器 (Recorder Manager)"
 
 ## 架构
 
-```mermaid
-graph TB
-    Handler[Command Handler] --> RecMgr[Recorder Manager]
-    RecMgr --> TaskMap[任务映射表]
-    RecMgr --> Recorder[Recorder Crate]
-    RecMgr --> DB[Database]
-    RecMgr --> Progress[Progress Tracker]
+[录制管理器：房间实例、媒体写入与状态回传](https://bsr.powerlive.io/diagrams/recorder-manager.html)
 
-    Recorder --> Platform[平台实现]
-    Platform --> FFmpeg[FFmpeg]
+实际入口是 `add_recorder` 和 `set_enable`。管理器按 `platform:room` 保存 `RecorderTrait` 实例；录制器写入本场绑定的存储，管理器异步处理 `RecordStart`、`RecordUpdate` 和 `RecordEnd`。弹幕预览不经过这条管理队列，见[事件分发](../frontend/invoker.md#应用事件系统)。
 
-    RecMgr --> EventEmitter[事件发射器]
-    EventEmitter --> Frontend[前端]
-```
+下文的生命周期代码是概念示例，不是可调用的 API 或当前结构体定义。实际字段和时序以 [`RecorderManager`](https://github.com/powerlive-io/bili-shadowreplay/blob/main/src-tauri/src/recorder_manager.rs) 为准。
 
 ## 核心数据结构
 
