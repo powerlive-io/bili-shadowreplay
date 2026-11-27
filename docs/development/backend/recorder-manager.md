@@ -5,7 +5,7 @@ title: "录制管理器 (Recorder Manager)"
 
 ## 概述
 
-`recorder_manager.rs` 是录制系统的核心协调器，负责管理所有录制任务的生命周期。位于 `src-tauri/src/recorder_manager.rs`。
+录制管理器位于 `src-tauri/src/recorder_manager.rs`。`recorder_manager.rs` 负责协调各房间的录制器，管理录制任务的创建、运行和结束。
 
 ## 主要职责
 
@@ -17,20 +17,11 @@ title: "录制管理器 (Recorder Manager)"
 
 ## 架构
 
-```mermaid
-graph TB
-    Handler[Command Handler] --> RecMgr[Recorder Manager]
-    RecMgr --> TaskMap[任务映射表]
-    RecMgr --> Recorder[Recorder Crate]
-    RecMgr --> DB[Database]
-    RecMgr --> Progress[Progress Tracker]
+[录制管理器：房间实例、媒体写入与状态回传](https://bsr.powerlive.io/diagrams/recorder-manager.html)
 
-    Recorder --> Platform[平台实现]
-    Platform --> FFmpeg[FFmpeg]
+实际入口是 `add_recorder` 和 `set_enable`。管理器按 `platform:room` 保存 `RecorderTrait` 实例；录制器写入本场绑定的存储，管理器异步处理 `RecordStart`、`RecordUpdate` 和 `RecordEnd`。弹幕预览不经过这条管理队列，见[事件分发](../frontend/invoker.md#应用事件系统)。
 
-    RecMgr --> EventEmitter[事件发射器]
-    EventEmitter --> Frontend[前端]
-```
+下文的生命周期代码是概念示例，不是可调用的 API 或当前结构体定义。实际字段和时序以 [`RecorderManager`](https://github.com/powerlive-io/bili-shadowreplay/blob/main/src-tauri/src/recorder_manager.rs) 为准。
 
 ## 核心数据结构
 
@@ -101,7 +92,9 @@ enum RecordingStatus {
 
 ## 切片任务取消
 
-实时回放页面的 `clip_range` 命令会先在数据库创建任务记录，再交给 `TaskManager` 执行实际的 `RecorderManager::clip_range` 流程。这样切片任务不会绑定在 Web 页面的 HTTP 请求生命周期上，页面关闭后仍可继续在后台运行。用户显式取消任务时，后端通过 `TaskManager::cancel_task` 中止运行中的任务；只有任务实际取消，或数据库记录仍处于 `pending` / `processing` 时，才会把数据库状态更新为 `cancelled`，避免覆盖已经完成的任务。
+实时回放页调用 `clip_range` 时，后端先在数据库中创建任务记录，再由 `TaskManager` 调度 `RecorderManager::clip_range`。任务不依赖发起请求的 Web 页面，即使关闭页面，后台仍可继续处理。
+
+只有用户明确取消时，后端才通过 `TaskManager::cancel_task` 中止任务。任务实际取消，或数据库记录仍处于 `pending` / `processing` 时，后端才写入 `cancelled`，避免覆盖已完成的任务。
 
 切片、转码、合并和弹幕压制通过原生媒体任务执行。异步 future 被取消时会触发协作取消和 AVIO 中断；阻塞工作线程持有输入、编码器、输出和临时素材，关闭原生上下文后才释放资源。文件尾和关闭成功后才发布临时输出，发布后再发送完成进度。BGRA 输入通过有界队列传入，取消同时唤醒生产者和消费者。
 

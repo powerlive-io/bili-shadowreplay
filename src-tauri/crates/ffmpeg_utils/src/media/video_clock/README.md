@@ -6,13 +6,13 @@ and [9.0 filter scheduler](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/fftools/
 Auto mode also follows the output policy selection in
 [ffmpeg_mux_init.c](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/fftools/ffmpeg_mux_init.c).
 
-The independent CLI oracle generates six uniquely colored frames, encodes PNG
-packets to `framehash`, and compares each source frame's identity, PTS and
-duration against the Rust scheduler. Its 25 combinations cover 10/25/30 fps
-CFR, VFR, passthrough, missing time intervals, initial offsets, EOF median tails,
-and output-side `-ss .15 -t .35` half-tick rounding. Thresholds are exact; there
-is no duration or pixel tolerance. It requires the CLI's `lavfi` input, `png`
-encoder and `framehash` muxer. The remaining five tests run with only libraries.
+The independent CLI oracle generates six frames, each a different color, and
+encodes them as PNG packets for `framehash`. It compares frame identity, PTS,
+and duration with the Rust scheduler. Its 25 combinations cover 10/25/30 fps
+CFR, VFR, passthrough, gaps, initial offsets, EOF median tails, and half-tick
+rounding for output-side `-ss .15 -t .35`. Duration and pixels must match
+exactly. The oracle needs the CLI's `lavfi` input, `png` encoder, and
+`framehash` muxer. The remaining five tests use only the libraries.
 
 The scheduler uses C `llrint`/`llrintf` nearest-even rounding and FFmpeg's added
 fractional-position precision. It keeps estimated decoder durations separate

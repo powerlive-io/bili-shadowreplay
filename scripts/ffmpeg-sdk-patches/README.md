@@ -21,13 +21,14 @@ python scripts/ffmpeg-sdk-patches/apply.py /path/to/ffmpeg-9.0.2 --check
 python scripts/ffmpeg-sdk-patches/apply.py /path/to/ffmpeg-9.0.2
 ```
 
-The offline helper verifies the upstream patch, source and patched-file SHA-256
-values from `manifest.json`. It refuses unknown source contents and is idempotent
-after a successful application. It patches source only: building a replacement
-SDK still requires the intended compiler, complete FFmpeg configuration and all
-third-party development dependencies.
+The offline helper checks the SHA-256 values of the patch, the original source,
+and the patched files against `manifest.json`. It rejects unrecognized source
+files. Running it again after a successful patch makes no further changes.
+It only patches source: building a replacement SDK still requires the intended
+compiler, the full FFmpeg configuration, and all third-party build dependencies.
 
-Rebuild and validate the complete SDK before using it for exports. Replacing one
-official `avcodec` DLL with a differently configured custom DLL has not been
-validated and can remove decoders/encoders or mismatch dependencies. Keep a full
-matching set of headers, import libraries and runtime DLLs in a separate prefix.
+Rebuild and validate the complete SDK before using it for exports. Swapping
+only the official `avcodec` DLL for a custom build is untested: a different
+configuration can omit encoders or decoders, or introduce incompatible
+dependencies. Keep matching headers, import libraries, and runtime DLLs
+together in a separate prefix.

@@ -7,11 +7,11 @@
 ![GitHub Release](https://img.shields.io/github/v/release/powerlive-io/bili-shadowreplay)
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/powerlive-io/bili-shadowreplay/total)
 
-BiliBili ShadowReplay 是一个缓存直播并进行实时编辑投稿的工具。通过划定时间区间，并编辑简单的必需信息，即可完成直播切片以及投稿，将整个流程压缩到分钟级。同时，也支持对缓存的历史直播进行回放，以及相同的切片编辑投稿处理流程。
+BiliBili ShadowReplay 可以边录制直播边剪辑投稿。选中想保留的时间段，编辑切片、填写投稿信息，整个流程可在几分钟内完成。直播结束后，也可以回放已缓存的录播，按同样的方式剪辑和投稿。
 
 目前支持录制的直播平台：
 
-- B站
+- B 站
 - 抖音
 - 斗鱼
 - TikTok
@@ -34,7 +34,7 @@ BiliBili ShadowReplay 是一个缓存直播并进行实时编辑投稿的工具�
 
 ![rooms](docs/public/images/summary.png)
 
-前往网站查看说明：[BiliBili ShadowReplay](https://bsr.powerlive.io/)
+安装步骤和使用说明见 [BiliBili ShadowReplay](https://bsr.powerlive.io/) 文档站。
 
 ## 参与开发
 

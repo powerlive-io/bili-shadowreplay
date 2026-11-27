@@ -36,7 +36,7 @@ export const count = writable(0);
 
 ### 应用状态 Stores
 
-用于管理应用级别的全局状态，如用户配置、主题设置等。
+应用状态 Store 管理跨页面共享的数据，例如用户配置和主题设置。
 
 ### 录制状态 Stores
 
@@ -116,9 +116,9 @@ export const sum = derived(
 
 ## 最佳实践
 
-1. **保持 Store 简单**: 每个 store 应该只管理一个关注点
+1. **保持 Store 简单**：每个 Store 只负责一类状态
 2. **使用 TypeScript**: 为 store 定义明确的类型
-3. **避免嵌套订阅**: 使用 derived stores 而不是在订阅中再订阅
+3. **避免嵌套订阅**：用 derived store 组合状态，不要在一个订阅的回调中再创建订阅
 4. **命名约定**: 使用描述性的名称，如 `recordingStatus` 而不是 `status`
 5. **初始化**: 为 stores 提供合理的初始值
 

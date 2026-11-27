@@ -1,8 +1,8 @@
-`seek.mp4` is an 11-frame generated test pattern: 96×64, 10 fps, SAR 4:3,
-BT.709 limited range, H.264 with B-frames. It contains no third-party content.
-Tests can exercise decoding, accurate seeking and JPEG encoding without a CLI
-or an H.264 encoder installed. Optional oracles use the locally linked SDK's
-matching CLI to compare the complete JPEG bytes.
+`seek.mp4` is a generated 11-frame H.264 test pattern with B-frames: 96×64,
+10 fps, SAR 4:3, and BT.709 limited range. It contains no third-party content.
+Tests read the fixture directly to check decoding, accurate seeking, and JPEG
+encoding; they do not need a CLI or an H.264 encoder. The optional comparison
+tests use the CLI matching the linked SDK to compare JPEGs byte for byte.
 
 Reproduce with:
 

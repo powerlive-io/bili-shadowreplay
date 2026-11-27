@@ -9,11 +9,11 @@ BiliBili ShadowReplay 是一个基于 Tauri 2 的混合桌面应用，采用前�
 
 ### 前端技术栈
 
-- **框架**: Svelte 3 + TypeScript
+- **框架**: Svelte 5 + TypeScript
 - **构建工具**: Vite
 - **UI 框架**: Tailwind CSS + Flowbite
-- **AI 集成**: Rust Rig Agent（OpenAI 兼容 API、Ollama）
-- **音频可视化**: 时间轴显示由后端从素材音轨计算的波形峰值
+- **AI 交互**: 管理对话历史，展示工具调用，并在用户确认后执行需要授权的操作
+- **音频可视化**: 后端从素材音轨计算波形峰值，前端在时间轴上显示波形
 - **实时通信**: Socket.io
 
 ### 后端技术栈
@@ -22,80 +22,17 @@ BiliBili ShadowReplay 是一个基于 Tauri 2 的混合桌面应用，采用前�
 - **语言**: Rust (async/await with Tokio)
 - **数据库**: SQLite with sqlx (WAL mode)
 - **视频处理**: ffmpeg-next 直接链接 FFmpeg 共享库，统一执行探测、录制、音视频编解码与滤镜合成；结构化媒体任务提供进度和协作取消
-- **语音识别**: Whisper-rs (支持 CUDA/Metal 加速)
+- **语音识别**: `whisper-cpp-rs`（支持 CUDA/Metal 加速）
+- **AI 集成**: Rust Rig Agent（OpenAI 兼容 API、Ollama）
 - **流媒体处理**: M3U8-rs
 - **HTTP 服务**: Axum
 - **WebSocket**: Socketioxide
 
 ## 系统架构
 
-```mermaid
-graph TB
-    subgraph "前端层 (Svelte)"
-        UI[用户界面]
-        Store[状态管理 Stores]
-        Agent[AI Agent]
-        Invoker[Tauri Invoker]
-    end
+[系统架构：桌面与 Web 如何调用 Rust 后端](https://bsr.powerlive.io/diagrams/system-architecture.html)
 
-    subgraph "Tauri 桥接层"
-        Commands[Command Handlers]
-    end
-
-    subgraph "后端核心层 (Rust)"
-        RecorderMgr[录制管理器]
-        Database[数据库层]
-        FFmpeg[视频处理]
-        Whisper[语音识别]
-        HttpServer[HTTP 服务器]
-    end
-
-    subgraph "录制引擎"
-        Recorder[Recorder Crate]
-        Bilibili[Bilibili 平台]
-        Douyin[Douyin 平台]
-        Douyu[Douyu 平台]
-        Huya[Huya 平台]
-        Kuaishou[Kuaishou 平台]
-        TikTok[TikTok 平台]
-        Twitch[Twitch 平台]
-        YouTube[YouTube 平台]
-    end
-
-    subgraph "弹幕系统"
-        DanmuStream[Danmu Stream Crate]
-    end
-
-    UI --> Store
-    Store --> Invoker
-    Agent --> Invoker
-    Invoker --> Commands
-
-    Commands --> RecorderMgr
-    Commands --> Database
-    Commands --> FFmpeg
-    Commands --> Whisper
-    Commands --> HttpServer
-
-    RecorderMgr --> Recorder
-    Recorder --> Bilibili
-    Recorder --> Douyin
-    Recorder --> Douyu
-    Recorder --> Huya
-    Recorder --> Kuaishou
-    Recorder --> TikTok
-    Recorder --> Twitch
-    Recorder --> YouTube
-
-    RecorderMgr --> DanmuStream
-    DanmuStream --> Bilibili
-    DanmuStream --> Douyin
-    DanmuStream --> Douyu
-    DanmuStream --> Huya
-    DanmuStream --> Kuaishou
-    DanmuStream --> Twitch
-    DanmuStream --> YouTube
-```
+`invoker.ts` 在桌面端通过 Tauri IPC 调用后端，在 Web 端则请求 `/api/<command>`。图中将平台实现合在一起展示；各平台能否录制、能否收弹幕，见[平台支持](#平台支持)。后端向前端推送状态走的是另一条路径，见[应用事件系统](../frontend/invoker.md#应用事件系统)。
 
 ## 目录结构
 
@@ -114,7 +51,7 @@ src/
 ├── lib/
 │   ├── components/      # 可复用 UI 组件
 │   ├── stores/          # Svelte 状态管理
-│   ├── agent/           # AI Agent 实现
+│   ├── agent/           # 对话消息与工具确认
 │   ├── db.ts            # 前端数据库接口
 │   ├── interface.ts     # TypeScript 类型定义
 │   └── invoker.ts       # Tauri 命令调用封装
@@ -162,7 +99,7 @@ src-tauri/
 
 - **Stores**: 使用 Svelte 的响应式存储管理全局状态
 - **Invoker**: 封装 Tauri 命令调用，提供类型安全的前后端通信
-- **Agent**: 基于 Rig 的 Rust AI 助手，支持内容分析和工具确认
+- **Agent 前端**: 保存对话历史，发送请求，处理工具确认
 - **Components**: 可复用的 UI 组件库
 
 ### 后端核心模块
@@ -183,48 +120,15 @@ src-tauri/
 
 ### 录制流程
 
-```mermaid
-sequenceDiagram
-    participant UI as 前端 UI
-    participant Handler as Command Handler
-    participant RecMgr as Recorder Manager
-    participant Recorder as Recorder Crate
-    participant Platform as 平台实现
-    participant FFmpeg as FFmpeg
-    participant DB as Database
+[录制时序：房间监听、本场存储与录制事件](https://bsr.powerlive.io/diagrams/recording-sequence.html)
 
-    UI->>Handler: 开始录制请求
-    Handler->>RecMgr: create_recording()
-    RecMgr->>DB: 创建录制记录
-    RecMgr->>Recorder: 初始化录制器
-    Recorder->>Platform: 获取流信息
-    Platform-->>Recorder: 返回流 URL
-    Recorder->>FFmpeg: 启动录制
-    FFmpeg-->>RecMgr: 录制进度更新
-    RecMgr-->>UI: 进度通知
-    UI->>Handler: 停止录制请求
-    Handler->>RecMgr: stop_recording()
-    RecMgr->>FFmpeg: 停止录制
-    RecMgr->>DB: 更新录制状态
-```
+添加房间启动的是监听，不是立即写视频。开播后，录制器解析本场存储，发送 `RecordStart`；这条事件本身不保证首个视频分片已写入。房间开关走 `set_enable`，结束时管理器处理 `RecordEnd`。存储绑定和本机索引分别见[录制存储](../backend/recording-storage.md)与[录播目录](../backend/recording-catalog.md)。
 
 ### 切片生成流程
 
-```mermaid
-sequenceDiagram
-    participant UI as 前端 UI
-    participant Handler as Command Handler
-    participant FFmpeg as FFmpeg Module
-    participant DB as Database
+[生成时序：录播选区、素材记录与可选切片工程](https://bsr.powerlive.io/diagrams/material-sequence.html)
 
-    UI->>Handler: 生成切片请求 (时间区间)
-    Handler->>DB: 查询录播信息
-    DB-->>Handler: 返回录播路径
-    Handler->>FFmpeg: 执行切片命令
-    FFmpeg-->>Handler: 切片完成
-    Handler->>DB: 保存切片记录
-    Handler-->>UI: 返回切片信息
-```
+预览页调用 `generate_materials` 生成素材。默认每个选区生成一个素材；启用 `merge` 后，多个选区合为一个素材。只有勾选创建切片才会建立引用这些素材的工程，这一步不导出视频。详见[素材、切片工程与投稿](./material-project.md)。
 
 ## 平台支持
 
@@ -233,25 +137,26 @@ sequenceDiagram
 - **Bilibili**: 完整支持，包括录制、弹幕、投稿
 - **Douyin (抖音)**: 支持录制和弹幕
 - **Douyu (斗鱼)**: 支持录制和弹幕
-- **Huya (虎牙)**: 支持录制
-- **Kuaishou (快手)**: 支持录制
-- **TikTok**: 支持录制
+- **Huya (虎牙)**: 支持录制和弹幕
+- **Kuaishou (快手)**: 支持录制和弹幕
+- **TikTok**: 支持录制，不采集平台弹幕
 - **Twitch**: 支持录制和弹幕
 - **YouTube**: 支持直播录制和直播聊天
+- **RTMP 推流**: 接收 OBS 等工具推送的视频，不采集平台弹幕
 
-每个平台的实现位于 `src-tauri/crates/recorder/src/platforms/<platform>/` 目录。
+录制实现位于 `src-tauri/crates/recorder/src/platforms/`，弹幕提供方位于 `src-tauri/crates/danmu_stream/src/provider/`。
 
 ## 数据库架构
 
 使用 SQLite 作为主要存储，启用 WAL (Write-Ahead Logging) 模式以支持并发访问。
 
 主要数据表：
-- **rooms**: 直播间配置
-- **recordings**: 录播记录
-- **clips**: 切片记录
+- **recorders**: 直播间配置
+- **records**: 本机录播列表索引
+- **videos** / **projects**: 素材与切片工程
 - **tasks**: 任务状态
 - **accounts**: 账号信息
-- **settings**: 用户配置
+- **uploads**: 投稿草稿与历史记录
 
 数据库迁移系统位于 `src-tauri/src/migration/`，在应用启动时自动执行。
 

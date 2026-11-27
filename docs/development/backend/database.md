@@ -5,7 +5,7 @@ title: "数据库模块"
 
 ## 概述
 
-BiliBili ShadowReplay 使用 SQLite 作为主要数据存储，通过 sqlx 提供异步数据库操作。数据库模块位于 `src-tauri/src/database/`。
+BiliBili ShadowReplay 使用 SQLite 存储主要业务数据。数据库模块位于 `src-tauri/src/database/`，通过 sqlx 异步执行查询和写入。
 
 ## 技术栈
 
@@ -555,7 +555,7 @@ pub async fn get_rooms_with_latest_recording(
 
 1. **使用 sqlx 宏**: 编译时检查 SQL 语法和类型
 2. **连接池管理**: 合理配置连接池大小
-3. **事务使用**: 对多步操作使用事务保证一致性
+3. **使用事务**: 需要一起成功或失败的多步操作应放在同一事务中
 4. **索引优化**: 为常用查询字段创建索引
 5. **错误处理**: 正确处理数据库错误
 6. **数据验证**: 在插入前验证数据

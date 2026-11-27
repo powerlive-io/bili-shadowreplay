@@ -3,7 +3,7 @@ title: "Docker 部署"
 ---
 
 
-BiliBili ShadowReplay 提供了服务端部署的能力，提供 Web 控制界面，可以用于在服务器等无图形界面环境下部署使用。
+BiliBili ShadowReplay 可以部署在没有图形界面的服务器上，通过浏览器中的 Web 控制界面使用。
 
 官方镜像支持 `linux/amd64` 和 `linux/arm64`。Docker 会根据宿主机架构自动
 选择对应镜像；在 Android Termux 中运行请参考 [Termux 部署](./termux)。
@@ -38,15 +38,15 @@ sudo docker run -it -d\
 
 其中：
 
-- `$DATA_DIR`：为数据目录，对应于桌面版的数据目录，
+- `$DATA_DIR`：应用数据目录，对应桌面版的以下位置：
 
   Windows 下位于 `C:\Users\{用户名}\AppData\Roaming\cn.vjoi.bilishadowreplay`;
 
   MacOS 下位于 `/Users/{user}/Library/Application Support/cn.vjoi.bilishadowreplay`
 
 - `$CACHE_DIR`：为默认本地录制存储目录。保留 `/app/cache` 挂载位置以兼容旧录制；backend 配置和每场录播的绑定保存在 `$DATA_DIR` 中的数据库，通过设置页管理，不再以 TOML 的 `storage.backends.default.root` 为运行时来源。请同时保留数据库卷和录制文件卷；上传暂存和预览缓存改用容器的系统临时目录，不使用这个持久卷；
-- `$OUTPUT_DIR`：为输出目录，对应于桌面版的输出目录；
-- `$WHISPER_MODEL`：为 Whisper 模型文件路径，对应于桌面版的 Whisper 模型文件路径。
+- `$OUTPUT_DIR`：素材输出目录，对应桌面版的输出目录；
+- `$WHISPER_MODEL`：本地 Whisper 模型文件的路径。
 
 ## 网页设置
 

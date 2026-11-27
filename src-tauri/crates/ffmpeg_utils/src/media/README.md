@@ -17,15 +17,17 @@ Audio encoding owns format negotiation, sample framing, duration cutoff and
 encoder draining independently of file decoding. File and graph callers can
 feed the same encoder stage directly after their respective filter sinks.
 
-The shared scheduler follows buffer-source demand. Streams awaiting their turn
-retain compressed packets rather than eagerly decoding whole inputs. Compressed
-queues are bounded by 64 MiB/16384 packets and decoded queues by 64 MiB/1024
-frames; these queue limits are not a hard budget for codec/filter allocations.
-Input, graph and encoder EOF are handled separately. All outputs close before
-publication; each rename is atomic, with preflight checks for predictable errors.
-Multiple files do not form a filesystem transaction. Segment callers retain
-their partial-file guards, and resource leases outlive worker completion through
-publication so scratch directories cannot disappear too early.
+The shared scheduler decodes an input only when a buffer source requests it.
+Other streams keep their packets compressed while they wait. Compressed queues
+are limited to 64 MiB or 16384 packets, and decoded queues to 64 MiB or 1024
+frames. These limits do not cap memory allocated by codecs or filters.
+
+The scheduler handles input, graph, and encoder EOF separately. It closes all
+outputs before publication and checks for predictable errors before renaming
+files. Each rename is atomic; publishing multiple files is not a filesystem
+transaction. Segment callers keep their partial-file guards. Resource leases
+stay alive after the worker finishes so scratch directories remain available
+through publication.
 
 Shared graphs are configured once: rebuilding them midstream would reset
 concat/xfade timelines and discard buffered frames. They reject changes to
@@ -39,17 +41,17 @@ copy video and encode a single AAC stream at the join. This avoids inserting
 per-segment AAC pre-roll. Independent encodes retain their own format-change
 handling without resetting a composition.
 
-Encoder AVOptions are validated against the linked codec and unused options
-are rejected. Hardware readiness opens the actual configured encoder, feeds
-three synthetic frames and drains it. It is not inferred from registry
-membership; the application retains candidate ordering and software fallback.
+The encoder stage validates AVOptions against the linked codec and rejects
+unused options. To check hardware readiness, it opens the configured encoder,
+feeds it three synthetic frames, and drains it. A registry entry alone is not
+enough. The application keeps its candidate order and software fallback.
 VAAPI devices and filter hardware frame pools are attached through libavutil.
 
 The worker owns the input interrupt, codec/filter contexts and temporary output.
-Dropping the future signals cooperative cancellation. Output trailer, buffered
-write and close errors are propagated. Success publishes the file atomically
-before the final progress callback. Progress comes from media timestamps rather
-than parsing subprocess stderr.
+Dropping the future signals cooperative cancellation. The worker propagates
+errors from writing the trailer, flushing buffered writes, and closing the
+output. On success it publishes the file atomically before the final progress
+callback. Progress comes from media timestamps, not from subprocess stderr.
 
 Native FFmpeg warnings and errors also reach the application logger with their
 codec/filter context. Each blocking job retains its first eight and last eight

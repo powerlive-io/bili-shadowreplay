@@ -12,10 +12,10 @@ ffmpeg -f lavfi -i color=black:s=96x64:r=25:d=0.4 -c:v libx264 -preset ultrafast
 ffmpeg -f lavfi -i color=black:s=64x48:r=25:d=0.4 -c:v mpeg2video -g 10 -f mpegts probe-mpeg2.ts
 ```
 
-`probe-h264-no-parameters.ts` is a copy of `probe-h264.ts` whose two Annex B
-SPS/PPS NAL headers were replaced with filler NAL headers. Keeping the packet
-layout and timestamps models a live fragment that has a stream and duration
-but no decodable video parameters:
+`probe-h264-no-parameters.ts` is derived from `probe-h264.ts` by replacing its
+two Annex B SPS/PPS NAL headers with filler NAL headers. The packet layout and
+timestamps stay intact. This models a live fragment with a detectable stream
+and duration but no decodable video parameters:
 
 ```python
 import pathlib
@@ -27,6 +27,6 @@ assert count == 2
 pathlib.Path("probe-h264-no-parameters.ts").write_bytes(fragment)
 ```
 
-The paired fMP4 fixtures used by the same tests are the existing
-`src-tauri/tests/video/init.m4s` and `segment.m4s`. Their absolute media
-timestamps must not replace the HLS playlist's `EXTINF` duration.
+The same tests use `src-tauri/tests/video/init.m4s` and `segment.m4s` as a
+paired fMP4 fixture. Their absolute media timestamps must not replace the HLS
+playlist's `EXTINF` duration.

@@ -3,8 +3,9 @@ title: "FFmpeg 配置"
 ---
 
 
-FFmpeg 是一个开源的音视频处理工具，支持多种格式的音视频编解码、转码、剪辑、合并等操作。
-在本项目中，元数据、音频时间信息和 HLS 分片探测，以及波形、转写用完整 WAV、30 秒 WAV 分块、范围 WAV 提取、PowerLive 的 Opus 编码、编辑器预览 FLAC 分块、音频库导入、MP3 导出、缩略图、视频提帧、FLV 到 HLS 的录制，以及单输入视频转封装、素材转码和复制／编码裁剪，通过 `ffmpeg-next` 直接链接 `libavformat`、`libavcodec`、`libavutil`、`libswresample` 和 `libavfilter`。跨输入滤镜拼接、项目合成及 SRT 字幕和弹幕画面合成也使用共享的原生滤镜图和编码管线。正常运行不启动 `ffmpeg`、`ffprobe` 或 `ffplay` 进程；部分开发回归测试可用匹配 SDK 的 CLI 作独立对照。
+FFmpeg 是支持多种音视频格式的开源工具。BSR 通过 `ffmpeg-next` 直接链接它的共享库：`libavformat`、`libavcodec`、`libavutil`、`libswresample` 和 `libavfilter`。正常运行不会启动 `ffmpeg`、`ffprobe` 或 `ffplay` 进程；部分开发回归测试可用与 SDK 匹配的 CLI 作独立对照。
+
+这些库用于探测媒体元数据、音频时间信息和 HLS 分片。音频处理包括计算波形、提取转写用的完整 WAV、30 秒 WAV 分块或指定范围的 WAV，以及 PowerLive 的 Opus 编码、编辑器预览 FLAC 分块、音频库导入和 MP3 导出。视频处理包括生成缩略图、提帧、FLV 到 HLS 的录制、单输入转封装、素材转码，以及复制或编码裁剪。跨输入滤镜拼接、项目合成、SRT 字幕与弹幕画面合成使用共享的原生滤镜图和编码管线。
 
 范围 WAV 提取保留原 `-ss ... -i ... -t ...` 的时间行为，包括 AAC 预滚、容器起点、采样率变化及末帧边界。输出固定为 16 kHz 单声道 PCM；由于沿用 CLI 的逐帧截止规则，样本数不保证恰好等于请求秒数乘以采样率。
 
@@ -118,4 +119,4 @@ SDK 解包使用 Windows 自带的 `tar`；缺少该工具的旧环境也可使�
 
 SDK 的头文件、导入库和 DLL 保存在 `src-tauri/target/ffmpeg-sdk` 下按版本和源包校验值命名的目录中；后续启动验证文件校验值并复用，不重复下载或解包。SDK 更新或缓存损坏不会被当成有效依赖。DLL 复制到现有 `windows-runtime` 资源目录随安装包发布，保留 sherpa/CUDA 等其他运行库；未变化的 DLL 不重复覆盖。SDK 内的可执行文件仅供开发者可选的独立对照测试，不会复制到应用资源。
 
-自定义 SDK 可继续显式指定 `FFMPEG_DIR`；不要用仅含可执行文件的 essentials 压缩包替代 shared SDK。直接运行 Cargo 或已有 CI 脚本时，独立 `./ffmpeg_setup.ps1` 入口仍可使用，并继续配置当前 PowerShell/GitHub Actions 的环境。Skia 的独立准备方式见[原生渲染构建](../../development/native-overlay.md)。
+如需使用自定义 SDK，可显式指定 `FFMPEG_DIR`。不要用只含可执行文件的 essentials 压缩包替代 shared SDK。直接运行 Cargo 或现有 CI 脚本时，仍可调用 `./ffmpeg_setup.ps1` 配置当前 PowerShell 或 GitHub Actions 环境。单独准备 Skia 的方法见[原生渲染构建](../../development/native-overlay.md)。

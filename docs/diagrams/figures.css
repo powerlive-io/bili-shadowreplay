@@ -1,0 +1,45 @@
+/* Shared by the Markdown embed and the offline, standalone HTML figure. */
+.bsr-figure {
+  --paper: light-dark(#faf9f6, #22211f);
+  --panel: light-dark(#efede5, #302f2a);
+  --surface: light-dark(#fff, #242321);
+  --storage: light-dark(#dedbd1, #434137);
+  --ink: light-dark(#171715, #f5f3ec);
+  --muted: light-dark(#585750, #ccc8bd);
+  --stroke: light-dark(#7e7b71, #a19d90);
+  --clay: light-dark(#d97856, #df906d);
+  --clay-edge: light-dark(#ad573c, #df906d);
+  --on-clay: #231b15;
+  max-width: 100%;
+  min-width: 0;
+  margin-inline: 0;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif);
+}
+.dark .bsr-figure { color-scheme: dark; }
+.light .bsr-figure { color-scheme: light; }
+.bsr-figure svg { display: block; width: 100%; height: auto; }
+.bsr-figure text { fill: var(--ink); }
+.bsr-figure :is(.fig-title, .fig-heading, .fig-name) { font-family: inherit; font-weight: 600; }
+.bsr-figure :is(.fig-heading, .fig-name) { font-size: 16px; }
+.bsr-figure .fig-detail { font-size: 13px; fill: var(--muted); }
+.bsr-figure .fig-code { font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--muted); }
+.bsr-figure .fig-focus text { fill: var(--on-clay); }
+.bsr-figure figcaption {
+  margin: 0 auto 1rem;
+  max-width: 48rem;
+  text-align: center;
+  text-wrap: balance;
+  line-height: 1.5;
+}
+.bsr-figure .fig-title {
+  display: block;
+  margin: 0 0 .4rem;
+  color: var(--ink);
+  font-size: clamp(1.125rem, 2vw, 1.75rem);
+  line-height: 1.25;
+}
+.bsr-figure .fig-summary { color: var(--muted); font-size: .875rem; }
+@media print {
+  .bsr-figure { break-inside: avoid; }
+  .bsr-figure, .dark .bsr-figure { color-scheme: light; }
+}

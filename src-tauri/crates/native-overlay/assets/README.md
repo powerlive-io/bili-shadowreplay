@@ -1,6 +1,6 @@
 # Pinned assets
 
-Unicode 16 emoji sequences and the Noto COLRv1 font used by the native renderer. No CJK font is bundled. The Unicode table has one trailing space removed from a comment to satisfy the repository whitespace check; sequence data is unchanged.
+This directory contains the Unicode 16 emoji sequences and the Noto COLRv1 font used by the native renderer. It does not bundle a CJK font. The bundled Unicode table differs from the upstream file by one trailing space, removed from a comment to pass the repository's whitespace check. The sequence data is unchanged.
 
 - `Noto-COLRv1.ttf`
   - URL: https://raw.githubusercontent.com/googlefonts/noto-emoji/e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e/2D/fonts/Noto-COLRv1.ttf

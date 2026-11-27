@@ -55,7 +55,7 @@ Windows 的普通桌面和 headless 构建都默认包含 GPU 合成后端，并
 yarn tauri build
 ```
 
-现有原生解码和项目滤镜图负责剪辑、缩放、静态图层与时间轴，输出 NV12 视频底图；底图上传一次，Skia 在共享 Vulkan 设备上绘制预乘透明叠层，专用 Vulkan compute shader 在 GPU 合成并输出 NV12 硬件帧，随后由原 `MediaPlan` 编码和封装。音频复制/混音、进度、取消、临时文件发布及资源 lease 继续使用现有实现，没有 rawvideo 管道或外部 FFmpeg 进程。
+原生解码器和项目滤镜图负责剪辑、缩放、静态图层与时间轴，输出 NV12 视频底图。底图只上传一次。Skia 在共享 Vulkan 设备上绘制预乘透明叠层，专用 Vulkan compute shader 在 GPU 上完成合成并输出 NV12 硬件帧，最后交回原 `MediaPlan` 编码和封装。音频复制和混音、进度、取消、临时文件发布及资源租约仍沿用现有实现，不使用 rawvideo 管道或外部 FFmpeg 进程。
 
 应用后端允许最多三帧 GPU 工作在途。Skia 提交后通过同一图形队列和 `AVVkFrame` timeline 连接后续转换与编码，不再在每次绘制及桥接屏障后固定等待 CPU；复用帧槽、最终 drain、错误或取消时仍会等待 GPU，并持有帧和纹理直到消费者结束。编码器使用 `async_depth=3`。这消除了渲染帧回读，CPU 视频解码和底图上传仍然存在。
 
@@ -67,12 +67,7 @@ yarn tauri build
 
 macOS 与 Windows 共享 `MediaPlan`、Skia Vulkan 场景绘制、专用 Vulkan compute 合成和 NV12 转换，以及原生解码、时间轴、音频、分段缓存、取消和封装逻辑。`RenderPipeline` 显式选择渲染后端与编码器；编码器名称不再决定渲染方式，同样使用 VideoToolbox 的 CPU/GPU 导出具有不同缓存身份。
 
-```text
-MediaPlan 解码/滤镜 → NV12 底图上传 → Skia Vulkan + Vulkan compute 合成
-                                      ├─ Windows: AVVkFrame → Vulkan Video
-                                      └─ macOS: MoltenVK R8/RG8 → Metal blit
-                                                → IOSurface/CVPixelBuffer → VideoToolbox
-```
+[GPU 导出：共享的合成路径与两个平台的帧交接](https://bsr.powerlive.io/diagrams/gpu-export.html)
 
 macOS 使用 `VK_EXT_metal_objects` 导出两个独立 GPU 纹理，复制到 FFmpeg VideoToolbox 帧池提供的 IOSurface。它不使用 Skia Metal 渲染后端，也不要求 Vulkan Video。桥接默认采用最多三帧的异步交接队列：检查 Vulkan 写入完成后提交 Metal GPU blit，复制完成的帧按顺序交给原 `MediaPlan` 编码器；队列满、收尾或取消时才阻塞推进。没有 `readPixels`、`hwdownload` 或 CVPixelBuffer CPU 映射，但每帧仍有一次 GPU 内部复制，并非严格的零拷贝。底图目前仍由 CPU 多线程解码并上传一次。
 
@@ -151,7 +146,7 @@ yarn tauri dev
 # yarn tauri build
 ```
 
-这两个 Skia 开关按变量是否存在判断，`0`、`false` 和空字符串也会启用。不要在 Windows/macOS、跨平台的全局环境或 workflow 顶层设置占位值；需要恢复默认路径时使用 `unset FORCE_SKIA_BUILD SKIA_USE_SYSTEM_LIBRARIES`，而不是赋空值。
+这两个 Skia 开关只检查环境变量是否存在。即使设为 `0`、`false` 或空字符串，开关也会生效。不要在 Windows/macOS、跨平台的全局环境或 workflow 顶层设置占位值。要恢复默认构建方式，请执行 `unset FORCE_SKIA_BUILD SKIA_USE_SYSTEM_LIBRARIES`，不要赋空值。
 
 首次源码构建会下载 Skia 及其依赖，显著增加编译时间、磁盘与内存开销，需要能够访问上游源码。修改构建变量或切换系统库版本后，不应复用旧的 Skia 构建产物；请清理对应的 Cargo 构建缓存后重试。
 
@@ -165,7 +160,7 @@ AppImage 也受到构建系统 ABI 和系统运行库的限制，不代表兼容
 
 Docker 的构建阶段与运行阶段应保持在同一 **Debian trixie** 基线上，分别安装对应的开发包和运行库。不要只升级 builder 后继续使用旧版 Debian runtime，也不要把 Ubuntu 构建出的二进制直接复制到 Debian 镜像中。容器使用自身的用户态运行库，不要求宿主机安装上述 Ubuntu 桌面依赖；使用方式见 [Docker 部署](../getting-started/installation/docker.md)。
 
-发布前仍需在 Linux CI 或对应系统上完成实际源码编译、原生渲染测试和安装包冒烟测试，并检查二进制的动态依赖（例如 `ldd`）是否都能在目标系统解析。仅检查 workflow、配置或文档不能替代这些验证。
+发布前仍需在 Linux CI 或目标系统上从源码编译，执行原生渲染测试和安装包冒烟测试，并用 `ldd` 等工具确认目标系统能解析二进制文件的所有动态依赖。这些步骤不能用检查 workflow、配置或文档代替。
 
 ## 字幕入口
 

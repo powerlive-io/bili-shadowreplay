@@ -7,7 +7,7 @@ BSR 提供 MCP Server，让支持 MCP 的外部 Agent 完成从录播到投稿�
 
 ## 启用服务
 
-打开 BSR 的设置页面，在 **MCP Server** 中打开 **启用 MCP Server**。开关立即启动或停止服务，配置会自动保存，重启 BSR 后保持原来的设置。页面会显示实际运行状态和连接地址。
+在 BSR 设置页的 **MCP Server** 下，打开 **启用 MCP Server**。切换开关会立即启动或停止服务，页面随即显示实际运行状态和连接地址。设置会自动保存，重启 BSR 后仍然生效。
 
 默认端口为 `18763`。如需更改，在 **MCP 端口** 中输入 `1024–65535` 之间的整数，然后点击 **保存端口**。服务运行时会立即切换到新端口；服务关闭时也会保存配置，下一次启用时使用新端口。未点击保存的输入不会影响服务开关或页面中的连接地址。
 
@@ -73,9 +73,15 @@ BSR 必须保持运行。客户端连接后会自动发现当前可用工具，�
 
 ### 后台任务
 
-`generate_materials`、`clip_range`、`generate_video_subtitle` 和 `generate_archive_subtitle` 在后台执行，调用后立即返回 `task_id`。用 `get_task` 查询，直到 `status` 为 `success`、`failed` 或 `cancelled`；成功后 `metadata.result` 中是产出的 ID，例如素材的 `video_id`，或 `material_ids` 与 `project_id`。字幕生成完成后用 `get_video_subtitle` 或 `get_archive_subtitle` 读取。开始执行前就能发现的错误（例如素材或录播不存在）会直接作为调用错误返回。在任务队列中运行的任务可以用 `cancel_task` 取消；字幕识别不在任务队列中，无法取消。
+[MCP 后台任务：从任务编号到素材 ID，再交给用户发布](https://bsr.powerlive.io/diagrams/mcp-task-handoff.html)
 
-`encode_video_subtitle` 同样立即返回，结果中的 `task_id` 可用于 `get_task`。返回排队任务不代表视频已压制完成。
+`generate_materials`、`clip_range`、`generate_video_subtitle` 和 `generate_archive_subtitle` 会先短暂等待结果。快速完成时，调用直接返回 `status: "success"` 和 `result`；能立即发现的错误（如素材不存在）直接作为调用错误返回。
+
+如果工作仍在后台执行，用返回的 `task_id` 作为 `get_task` 的 `id` 参数。`task.status` 为 `pending` 或 `processing` 时继续查询，`failed` 或 `cancelled` 时停止，不创建草稿。素材任务成功后从 `task.metadata.result` 取 `video_id`（`clip_range`）或 `material_ids`、可选的 `project_id`（`generate_materials`）；字幕任务成功后用 `get_video_subtitle` 或 `get_archive_subtitle` 读取字幕。
+
+队列中的任务可用 `cancel_task` 取消；字幕识别不在任务队列中，无法取消。
+
+`encode_video_subtitle` 立即返回排队任务，不代表视频已压制完成。用结果中的 `task_id` 调用 `get_task` 查看状态。
 
 ### 切片
 
@@ -111,7 +117,7 @@ MCP Server 使用单独配置的端口（默认 `18763`），仅监听 BSR 所�
 
 桌面 BSR 和 Agent 在同一台机器上时可直接使用上面的地址。如果网页设置连接的是另一台机器上的 BSR，所显示的 `127.0.0.1` 指的是 BSR 所在机器，无法直接从网页所在机器访问；需让 Agent 在 BSR 所在机器运行，或配置适当的本机端口转发。
 
-在 Docker 中，`127.0.0.1` 指容器内部。Agent 需要位于同一容器或共享网络命名空间，也可以使用能够连接到容器内部回环地址的转发方式。**仅映射容器的 MCP 端口到宿主机不足以访问服务**，因为服务没有监听容器的外部网络接口。
+在 Docker 中，`127.0.0.1` 指容器内部。**仅将容器的 MCP 端口映射到宿主机不足以访问服务**，因为服务不监听容器的外部网络接口。请让 Agent 与 BSR 在同一容器内运行、共享网络命名空间，或使用能连接到容器内部回环地址的转发方式。
 
 ## 连接排查
 

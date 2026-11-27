@@ -19,7 +19,7 @@ yarn install --frozen-lockfile
 
 ### Rust 与原生依赖
 
-通过 rustup 安装 Rust。仓库的 `rust-toolchain.toml` 会选择固定工具链，并包含 rustfmt 和 Clippy，不需要修改全局默认版本：
+使用 rustup 安装 Rust 后，仓库会按 `rust-toolchain.toml` 选择指定版本的工具链，包括 rustfmt 和 Clippy。无需修改全局默认版本：
 
 ```bash
 rustc --version
@@ -102,7 +102,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features headless
 ```
 
-媒体验证的比较规则与覆盖范围见[音频回归测试](audio.md)和[视频与录制回归测试](video-recording.md)。真实直播和硬件测试按需选择具体名称，不要无差别运行所有忽略用例。
+媒体验证的比较规则和覆盖范围见[音频回归测试](audio.md)与[视频与录制回归测试](video-recording.md)。验证真实直播或硬件时，按名称选择需要的用例，不要一次运行所有默认忽略的测试。
 
 ## 常见问题
 

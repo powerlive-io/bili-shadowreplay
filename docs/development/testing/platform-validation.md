@@ -44,7 +44,7 @@ GOP 测试覆盖软件编码器，以及可用的 NVENC／VideoToolbox 编码器
 1. 将核心测试可执行文件放在打包的 SDK DLL 旁。
 2. 在临时测试终端中移除 SDK 环境变量，并从 `PATH` 移除 SDK／CLI 目录。
 3. 确认原生媒体测试仍通过；缺少可执行文件时，可选 CLI 对照应跳过。
-4. 检查打包 DLL 与构建 SDK 匹配，安装包不包含 FFmpeg CLI 可执行文件。
+4. 确认打包的 DLL 与构建时使用的 SDK 匹配，并检查安装包中没有 FFmpeg CLI 可执行文件。
 5. 补做交互式 GUI 冒烟测试，不能只凭包内测试通过就完成验收。
 
 Linux 包的私有运行库、干净环境安装和动态依赖检查见 [FFmpeg 配置](../../getting-started/config/ffmpeg.md#linux-docker)。
@@ -69,7 +69,7 @@ node --test scripts/tests/windows-runtime.test.mjs scripts/tests/prepare-windows
 
 自动化测试覆盖环境变量大小写、开发者环境解析、自定义 FFmpeg SDK、DLL 部署与重复启动、SDK 缺失文件拒绝、Skia 缓存版本及校验。PowerShell 集成测试仅在 Windows 执行，不联网。
 
-实机验收与前面的直接 Cargo 验证不同：应在**普通终端**中清除手动 `FFMPEG_DIR`、`SKIA_BINARIES_URL`、`LIBCLANG_PATH` 和 VS 开发环境，依次确认首次准备、缓存复用、`yarn tauri dev` 构建及原生 GPU 导出探测。
+实机验收要验证启动器能否自行准备环境，不同于前面的直接 Cargo 验证。请使用**普通终端**，清除手动设置的 `FFMPEG_DIR`、`SKIA_BINARIES_URL`、`LIBCLANG_PATH` 和 VS 开发环境，再依次验证首次准备、缓存复用、`yarn tauri dev` 构建和原生 GPU 导出探测。
 
 ## 真实直播间冒烟测试
 
@@ -89,4 +89,4 @@ cd src-tauri
 DOUYU_TEST_ROOM_ID=1667826 cargo test -p recorder live_room_records_continuously_for_five_minutes --lib -- --ignored --nocapture
 ```
 
-测试通过生产 `DouyuRecorder` 循环录制五分钟，要求只产生一个归档，并在每分钟获得约一分钟的新 HLS 分片；结束后删除临时录制。如果示例房间已下播，必须替换房间号。
+该测试使用生产代码中的 `DouyuRecorder` 循环录制五分钟。预期只产生一个归档，每分钟新增的 HLS 分片总时长约为一分钟；测试结束后删除临时录制。如果示例房间已下播，请换成正在直播的房间号。

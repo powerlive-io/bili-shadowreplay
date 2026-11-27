@@ -1,9 +1,10 @@
 # Recording JSON catalog
 
-Each storage owns its current recording metadata. The application's SQLite
-projection provides aggregation, sorting and pagination; it is rebuildable.
-New catalogs need only ordinary object GET, PUT and LIST, not conditional PUT,
-distributed leases, a database server, compaction or metadata GC.
+Each storage backend owns its recordings' current metadata. The application
+can rebuild its SQLite projection from that metadata and uses it for
+aggregation, sorting, and pagination. New catalogs require only ordinary object
+GET, PUT, and LIST operations. They do not require conditional PUT, distributed
+leases, a database server, compaction, or metadata GC.
 
 ## Layout and ownership
 
@@ -19,12 +20,13 @@ Media paths stay unchanged. Keeping JSON outside the media namespace prevents
 file transfers from accidentally publishing a source's metadata in the target
 before verification and the catalog commit.
 
-**Exactly one BSR instance may write a remote storage.** There is no remote
-writer detection, automatic takeover, or cross-machine CAS. Do not simultaneously
-record, edit, delete, transfer, or modify files through another instance/tool.
-Within a process, UUID-scoped guards prevent duplicate writers; local roots also
-use an OS file lock. Readers may coexist, but scan failures must retain the last
-complete SQLite projection rather than publish an empty index.
+**Only one BSR instance may write to a given remote store.** There is no remote
+writer detection, automatic takeover, or cross-machine CAS. While that instance
+is writing, do not record, edit, delete, transfer, or modify files with another
+instance or tool. Within a process, UUID-scoped guards prevent duplicate
+writers; local roots also use an OS file lock. Readers may coexist. If a scan
+fails, keep the last complete SQLite projection rather than publishing an
+empty index.
 
 ## Publication and failure behavior
 

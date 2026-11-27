@@ -11,14 +11,7 @@ Agent 主体位于 `src-tauri/src/agent/`。前端的 `src/lib/agent/agent.ts` �
 
 ## 架构
 
-```mermaid
-graph LR
-    UI[AI 页面] --> Command[agent_chat]
-    Command --> Agent[Rust Rig Agent]
-    Agent --> LLM[OpenAI 兼容 API / Ollama]
-    Agent --> Tool[BsrTool]
-    Tool --> Backend[Database / RecorderManager]
-```
+[AI 工具调用：Rust 只读查询与前端确认分支](https://bsr.powerlive.io/diagrams/agent-tools.html)
 
 每次请求会携带前端当前保存的完整对话记录。用户、助手和工具消息会转换为 Rig 的真实角色消息，而不是拼接成单个文本提示。Rust Agent 在单次 command 内完成模型调用和只读工具循环，并将最终文本、工具调用轨迹及错误状态一起返回。
 
@@ -29,7 +22,7 @@ UI 支持以下 Provider：
 - `openai`：使用 OpenAI Chat Completions 兼容接口，需要 endpoint、API Key 和模型名。
 - `ollama`：使用 Ollama 接口；endpoint 为空时默认使用 `http://localhost:11434`。
 
-API Key 只随当前 `agent_chat` 请求传入 Rust 端，不写入后端数据库或工具结果。现有 UI 会在浏览器本地设置中保存模型配置，因此不要在共享设备上保存敏感密钥。
+助手从 BSR 的模型设置中读取配置，并随 `agent_chat` 请求将 API Key 传入 Rust 端。保存模型设置时，密钥会保存在运行 BSR 的机器上，而不只存在于浏览器中。它不会作为工具结果返回；请限制对应用配置文件的访问，不要在共享设备上保存敏感密钥。
 
 前端准备模型配置：
 
@@ -85,7 +78,7 @@ Rust Agent 注册一个名为 `bsr` 的工具，通过带类型约束的 `oneOf`
 
 工具在 Rust 进程内直接访问 `Database` 和 `RecorderManager`。`get_accounts` 返回前会屏蔽 Cookie，避免凭据进入模型上下文。
 
-删除、上传、修改录制配置以及生成文件等操作不会在 Rust Agent 中自动执行。工具先返回 `confirmation_required`，前端展示工具名和完整参数；用户点击确认后，前端只执行该调用一次，追加具有匹配 `toolCallId` 的 ToolMessage，再携带完整历史继续 Agent。拒绝也会生成对应的 ToolMessage。存在未处理调用时，普通消息发送会被禁用。
+对于删除、上传、修改录制配置或生成文件等操作，Rust Agent 只返回 `confirmation_required`，不自行执行。前端显示工具名和完整参数，等用户决定。用户确认后，前端执行一次调用，将结果作为带有匹配 `toolCallId` 的 ToolMessage 加入对话，再把完整历史发给 Agent。拒绝也会生成对应的 ToolMessage。只要还有待处理的调用，就不能发送普通消息。
 
 ## 工具调用轨迹
 
@@ -115,6 +108,6 @@ interface ToolCall {
 
 ## 对话历史
 
-AI 页面将消息保存到浏览器 `localStorage`，刷新页面后恢复展示。每次新请求会发送当前完整消息列表，因此模型可以继续此前对话。
+AI 页面将对话保存在浏览器的 IndexedDB 中，刷新后可继续之前的对话。如果只有旧版 `localStorage` 记录，会先将它迁入 IndexedDB，写入成功后才删除旧记录。每次请求都携带当前完整的消息列表。
 
-历史会随着对话增长并消耗更多上下文长度。若模型报告上下文过长，可通过页面的清空对话操作开始新会话。
+对话越长，每次请求占用的上下文越多。如果模型提示上下文过长，可以在页面上清空对话，开始新会话。
