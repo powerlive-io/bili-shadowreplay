@@ -1,12 +1,6 @@
 import "./styles.css";
-import { mount } from "svelte";
-import App from "./App.svelte";
+import { mountPage } from "./lib/mount-page";
 import { initTheme } from "./lib/stores/theme";
 
 initTheme();
-
-const app = mount(App, {
-  target: document.getElementById("app")!,
-});
-
-export default app;
+void mountPage(() => import("./App.svelte"));

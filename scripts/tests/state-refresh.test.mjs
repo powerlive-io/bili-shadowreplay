@@ -227,14 +227,13 @@ async function invokerFixture({ tauri = false, invokeRoom = async () => null, na
     disconnect() {},
   };
   const context = vm.createContext({
-    console: { log() {}, info() {}, error() {} }, TextEncoder,
+    console: { log() {}, info() {}, error() {} }, TextEncoder, URL,
     setTimeout: (callback, ms) => { retryTimers.set(++timerId, { callback, ms }); return timerId; },
     clearTimeout: (id) => retryTimers.delete(id),
-    window: tauri ? { __TAURI_INTERNALS__: {} } : {},
-    localStorage: { getItem: () => "" },
     fetch: async () => ({ ok: true, json: async () => ({ code: 0, data: null }) }),
   });
   const dependencies = {
+    "./web-endpoint": { ENDPOINT: "http://localhost:3000", TAURI_ENV: tauri },
     "@tauri-apps/api/core": { invoke: async (name, args) => {
       if (name === "set_event_rooms") {
         roomCommands.push(JSON.parse(JSON.stringify(args.rooms)));
